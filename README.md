@@ -105,17 +105,33 @@ A wrap signed by a throwaway key, addressed to a key it has never seen, with a f
 
 Where a relay serves kind 1059 only to the tagged key after NIP-42, `taggedFilter` asks by tag. Both ends hold the drop private key and can authenticate as it. That leaks the tag to that relay and nothing else, and callers should record that the weaker pull was used.
 
-## What it does not do
+## What the layers around it must do
 
-It is not foolproof, and this list is the honest scope.
+This library is one layer. It makes the *event* say nothing. The layers
+around it make the *connection*, the *keys* and the *bytes* say nothing,
+and a client that skips one of them has a hole. Each is a client's job and
+each has a known answer:
 
-- **Hide your address.** It builds events; the carrier hides where they come from. Post from your own IP and a relay has your IP beside every wrap. Use Tor or another anonymous carrier, always.
-- **Survive a stolen rendezvous key.** Whoever holds it can derive every past and future tag for that pair and open every wrap layer, though not the seal inside. Rotate the key when a device is lost. Forward secrecy for tags needs the per-card ephemerals and the erasure of old ones, which this library cannot do for you.
-- **Hide a change of bucket.** Every wrap in a conversation is the bucket's size. If you move to a bigger bucket, that is visible. Pick one per conversation and keep it.
-- **Beat a relay that refuses broadcast.** A relay that serves wraps only to their tagged key after NIP-42 forces the tagged pull, which shows that relay your tag set and when you fetch. `taggedFilter` exists for that case and it is weaker; say so in the client.
-- **Beat a global observer.** A watcher who sees every wire sees a Tor user posting one wrap an hour and pulling the stream. It cannot tell if you spoke. It can tell you are one of the people who might have.
-- **Carry files or calls.** A wrap is a few kilobytes. Put a hash and a key in the wrap and the bytes somewhere else.
-- **Talk to the network.** It builds and opens events and tells you when the next one is due. Publishing and subscribing are yours.
+- **The address.** Post and pull over an anonymous carrier: Tor, I2P, or a
+  relay your own circle runs. The library never sees a socket; the carrier
+  is where the address is hidden.
+- **The rendezvous key.** Derive it as a child of the root, hand only that
+  to devices, rotate it by index when a device is lost, and use fresh
+  per-card ephemerals so old tags cannot be recomputed from a later theft.
+  Then a stolen key costs one index of one pair's pattern, and nothing
+  older or newer.
+- **The bucket.** One size per conversation, chosen once, never changed.
+  Fixed in the profile's conformance run, not per message.
+- **The relay.** Use relays that serve the gift-wrap stream by broadcast:
+  your circle's boxes always do. Treat a relay that only serves wraps to
+  their tagged key as a weaker path and show it as one.
+- **Files and calls.** Bytes go to a content-addressed store over the same
+  carrier with the key in a wrap; calls are never quiet, and the client
+  says so.
+
+What is left when every layer is in place is one sentence: a watcher who
+sees every wire can tell you are one of the people who use a carrier, and
+cannot tell whether you spoke, to whom, or when.
 
 ## Security notes
 
