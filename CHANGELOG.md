@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.1 (2026-09-09)
+
+### Bug Fixes
+
+- nostr-tools as a range, so a consumer carries one copy
+
+
+
 ## 0.2.0 (2026-09-09)
 
 ### Features
