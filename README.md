@@ -49,6 +49,31 @@ epoch_index = floor(unix_seconds / 3600)
 
 Both ends derive the same key with no ordering rule. A receiver keeps the previous, current and next epoch, so clock skew never drops a pair. Known-answer vectors are in `vectors/deaddrop.json`, using the same test keys as Link's so the `ikm` can be checked across both.
 
+## Rooms
+
+A room whose members share a key does not need pairwise secrets. Everyone
+derives the same drop key per epoch from the room key, under its own case
+byte so it can never collide with a pair's:
+
+```
+ikm  = 0x10 || HKDF-SHA256(roomKey, salt = "nostr-deaddrop/room/v1", info = "ikm", 32) || 32 zero bytes
+```
+
+`createRoomDrop` wraps an already-signed room event to that key with no
+seal and no re-signing; `openRoomDrop` gives it back verified. The relay
+sees no `d` tag, no kind and no author.
+
+`QuietTransport` does the whole thing for a room: wrap any transport with
+`publish`, `subscribe` and `close`, name the kinds that should go quiet, and
+those kinds ride inside drops on a cadence and come back by broadcast
+through the caller's original filters. Other kinds pass straight through,
+which is where live signalling belongs, because a slot of delay ends a call.
+
+```ts
+const quiet = new QuietTransport(relayPool, { roomKey, kinds: [1460], intervalSeconds: 3600 })
+// hand `quiet` to the room session exactly where the relay pool went
+```
+
 ## What a relay learns
 
 A wrap signed by a throwaway key, addressed to a key it has never seen, with a fixed-size ciphertext and an expiration a week out. A pull of every gift wrap since a timestamp. Nothing links two wraps to each other or to any person.

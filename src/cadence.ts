@@ -28,6 +28,11 @@ export class Cadence {
     return this.queue.length
   }
 
+  /** The next queued real drop, or null. For callers that make their own filler. */
+  take(): NostrEvent | null {
+    return this.queue.shift() ?? null
+  }
+
   slotIndex(unixSeconds: number): number {
     return Math.floor(unixSeconds / this.opts.intervalSeconds)
   }
