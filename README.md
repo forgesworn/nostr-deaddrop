@@ -37,6 +37,15 @@ for await (const ev of subscribe(broadcastFilter(lastPull))) {
 }
 ```
 
+## Which key to use
+
+Pass a **rendezvous key**, not your identity key. A rendezvous key is a
+child of your root (nsec-tree purpose `rendezvous`) whose public half you
+hand to contacts on a card and whose private half your devices hold. Your
+identity secret stays in its signer and never computes a shared secret with
+anyone; losing a device rotates the rendezvous key and touches nothing
+else. Every `myPrivateKey` and `peerPublicKey` below means that key.
+
 ## Derivation
 
 Input key material is byte-identical to [forgesworn-link's rendezvous tags](https://github.com/forgesworn/forgesworn-link/blob/main/docs/RENDEZVOUS.md): `case_byte || static_x || eph_x`, where `static_x` is the x-coordinate of ECDH over the two static Nostr keys and `eph_x` mixes per-card ephemerals when either side carries one. A pair that already has Link cards derives drop keys from the material it already holds.
