@@ -181,6 +181,22 @@ export class KeyTable<R = unknown> {
     return deriveDropKeyFromIkm(ikm, c, e, sender, counter)
   }
 
+  /**
+   * Record a counter as used for source `id` in the current epoch: one seen
+   * on the wire, drawn by another device holding the same key. A counter in
+   * another epoch, or under another ikm, is ignored, since it cannot be
+   * drawn here anyway.
+   */
+  markUsed(id: string, ikm: Uint8Array, epochIndex: number, counter: number, unixSeconds: number): void {
+    const e = epochIndexAt(unixSeconds, this.epochSeconds)
+    if (epochIndex !== e || !Number.isInteger(counter) || counter < 0) return
+    const ikmHex = bytesToHex(ikm)
+    if (this.sources.get(id)?.ikmHex !== ikmHex) return
+    let u = this.used.get(id)
+    if (!u || u.epoch !== e || u.ikmHex !== ikmHex) { u = { ikmHex, epoch: e, counters: new Set() }; this.used.set(id, u) }
+    u.counters.add(counter)
+  }
+
   /** The counters this process has used, per source, for persisting across a restart. */
   exportUsed(): Record<string, UsedCounters> {
     const out: Record<string, UsedCounters> = {}

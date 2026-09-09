@@ -122,7 +122,15 @@ time and the person should be told. A roster change keeps this member's
 used counters; a rekey forgets them, since the keys are new. Two devices
 posting as one member need disjoint `counterRange`s, `[0, 8)` and
 `[8, 16)`, and `exportUsed` and `importUsed` carry counters across a
-restart.
+restart. A drop that opens on this member's own key was posted by another
+device holding the same room key, and its counter is marked used here as
+well, so two devices on one member that can see each other's drops repeat
+a tag only inside the relay's propagation delay; disjoint ranges remain
+the guarantee, this is the backstop. `onPosted` fires once the relay has
+taken a slot's wrap, with the inner event it carried or none for a filler:
+that is the moment a counter is spent and a message has left the device,
+so it is where to persist `exportUsed` and to settle whatever was waiting
+on the send.
 
 Receiving is one broadcast pull per transport however many subscriptions
 ride on it: a live subscription from now plus a paged backfill over the

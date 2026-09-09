@@ -57,6 +57,13 @@ export interface QuietOptions extends DropOptions {
   counterRange?: [number, number]
   /** Called when a slot's publish fails (the drop stays queued and the same wrap is retried) or a queued event cannot be wrapped (it is dropped). */
   onError?: (error: unknown) => void
+  /**
+   * Called once the relay has taken a slot's wrap: with the inner event it
+   * carried, or none for a filler. This is the moment a counter is spent
+   * and a queued message has left the device, so it is where a caller
+   * persists `exportUsed` and settles whatever was waiting on the send.
+   */
+  onPosted?: (posted: { slot: number; wrap: NostrEvent; inner?: NostrEvent }) => void
 }
 
 interface QuietSub {
@@ -211,8 +218,10 @@ export class QuietTransport implements Transport {
         return
       }
       this.lastSlot = slot
-      if (this.current.inner) this.queue.shift()
+      const posted = this.current
+      if (posted.inner) this.queue.shift()
       this.current = undefined
+      try { this.opts.onPosted?.(posted) } catch (e) { this.opts.onError?.(e) }
     } finally {
       this.inFlight = false
     }
@@ -277,6 +286,11 @@ export class QuietTransport implements Transport {
     // stranger who saw a tag cannot burn it with junk, and a re-wrapped old
     // event is not shown twice.
     this.keep('w:' + wrap.id)
+    // A drop on this member's own key that opened was posted by a device
+    // holding the room key as this one: its counter is spent for this
+    // device too. Two devices on one member that can see each other's
+    // drops then repeat a tag only inside the relay's propagation delay.
+    if (hit.ref === this.member) this.table.markUsed(this.member, this.ikm, hit.key.epochIndex, hit.key.counter, this.now())
     if (this.delivered.has('i:' + inner.id)) return
     this.keep('i:' + inner.id)
     for (const s of this.quietSubs) if (matchFilters(s.filters, inner)) s.onEvent(inner, via)
