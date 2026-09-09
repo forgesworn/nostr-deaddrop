@@ -1,0 +1,55 @@
+{
+  "format": "nostr-deaddrop-known-answer-v1",
+  "saltUtf8": "nostr-deaddrop/v1",
+  "info": "\"drop\" || 0x00 || u64be(epoch_index)",
+  "ikm": "case_byte || static_x || eph_x (65 bytes), as forgesworn-link RENDEZVOUS.md §2",
+  "epochSeconds": 3600,
+  "testOnlyKeys": {
+    "nostrAPrivHex": "4873374aacd9fbbdf073a29078b6cf9f27c137107530c521458d5d83118ae733",
+    "nostrAPubXOnly": "3e0b147852ddd35607a06b4bb56ffc102e4d7b3ece162042c3f32f96a49c4613",
+    "nostrBPrivHex": "d1be49b906d68d1228f291fec7f9e373e7fc282605ed63763ad03cd53aa853f0",
+    "nostrBPubXOnly": "3e27f135286b183bb5dbc6e59a0ccc4a10750302b6ab68ac7495b3c5193012ec",
+    "ephAPrivHex": "daced59710de58fd5864e6821629414261d33addd59ceff45ffd2fba37dc5f4d",
+    "ephAPubXOnly": "d6bd3b313d2cbc4f0b2355179911bd45747e6bd1024b9fead9a72e914a28e827",
+    "ephBPrivHex": "8f2b5a94f17bec15e6da441bad23accd776e67d408fdc1683f41e91596c5c42f",
+    "ephBPubXOnly": "cb6a2c0dc18f820df7a46e59cfe510dc19a0494c7b47d04ba3065a68a921af19"
+  },
+  "cases": [
+    {
+      "name": "no-ephemeral",
+      "caseByte": 0,
+      "case": "none",
+      "ikmHex": "00c72057e75e1141b61b80f222d78f17a312d1950da578bae510a28c0f537801770000000000000000000000000000000000000000000000000000000000000000",
+      "epochIndex": 498216,
+      "dropPrivHex": "c2ea290f4cb5c089c921a7df65684c7ed9b27a2b8fad192138fdad4066964db1",
+      "dropPubXOnly": "8d8c74bb0287d29dbb7c12fb9fd0c3306a583a2274c16b096253c705639619b8"
+    },
+    {
+      "name": "both-ephemeral",
+      "caseByte": 2,
+      "case": "both",
+      "ikmHex": "02c72057e75e1141b61b80f222d78f17a312d1950da578bae510a28c0f537801773e0a7579af406dcd49cf4e477abeef28e52c9ac35c68e81c55ff3d6aad359aba",
+      "epochIndex": 498216,
+      "dropPrivHex": "657bdf8d23824f322b9afc275258ab3f2851a1940bfa745cea32f24d2f9ff3ef",
+      "dropPubXOnly": "5bb9bc92b1b7ab8512e8c5999eb43a4df115a08597110afde3887a3dd33a4d8a"
+    },
+    {
+      "name": "one-ephemeral-A-carries",
+      "caseByte": 1,
+      "case": "one",
+      "ikmHex": "01c72057e75e1141b61b80f222d78f17a312d1950da578bae510a28c0f537801772456c0cdf38cd038890194e740b12b7dff52b59ca56ee2421120d0aa49fb177c",
+      "epochIndex": 498216,
+      "dropPrivHex": "4323469e2ddd49fd7fcaa0b1cbe7d79cddac17c50526f4b69336e17db89f26ff",
+      "dropPubXOnly": "da7f6bf2f8a846abbeff35683f42f9dbacb5895af6415ec554c35764d0531f4f"
+    },
+    {
+      "name": "next-epoch-differs",
+      "caseByte": 0,
+      "case": "none",
+      "ikmHex": "00c72057e75e1141b61b80f222d78f17a312d1950da578bae510a28c0f537801770000000000000000000000000000000000000000000000000000000000000000",
+      "epochIndex": 498217,
+      "dropPrivHex": "f6a7a75ebe168c53fe47bb389151e06376a694d129a300a105f8674d1c7a0199",
+      "dropPubXOnly": "dd52e3937c7a4e43577541e0e3e4270aad50572f87e2527318fa5528c9978372"
+    }
+  ]
+}
