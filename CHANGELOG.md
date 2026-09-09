@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.2.0 (2026-09-09)
+
+### Features
+
+- drop takes a queued event back before its slot
+- a counter seen on the wire is spent for every device on the member, and onPosted marks the moment a drop left
+- rekey on QuietTransport, bounded pending queue
+- room drops and QuietTransport, so a room's chat rides drops on a cadence with nothing of the room on the wire
+- rendezvous drop keys, padded gift wraps, cadence and broadcast watch
+
+### Bug Fixes
+
+- second review pass on cadence, table and transport
+- apply the independent review to derivation, cadence, watch and transport
+- no Buffer in library source, it must run in a browser; node types for the tests
+- bucket defaults from a day of measured wraps, and the relay table
+- keys per direction and per member, no expiration by default, wrap at send time, random phase, replay dedupe, CSPRNG jitter
+
+
+
 ## 0.1.0
 
 - Second review pass (2026-09-09): ticks never overlap and a slot's wrap
