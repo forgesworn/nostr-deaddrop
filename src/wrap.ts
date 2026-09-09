@@ -6,8 +6,17 @@ import { randomBytes } from '@noble/hashes/utils.js'
 
 export const GIFT_WRAP_KIND = 1059
 export const PAD_TAG = 'pad'
-/** Default rumor size in bytes of serialised JSON. Every rumor is padded to exactly this. */
-export const DEFAULT_BUCKET = 2048
+/**
+ * Default rumor size in bytes of serialised JSON. Every rumor is padded to
+ * exactly this. Chosen from a day of real gift wraps on two public relays
+ * (2026-09-09): the median wrap content was 556 characters and the 90th
+ * percentile 2140. A 512-byte rumor makes a 1796-character wrap, inside
+ * that band; the old default of 2048 made a 4868-character wrap, which
+ * stood out from every real one.
+ */
+export const DEFAULT_BUCKET = 512
+/** Default bucket for room drops, which have one layer fewer: a 768-byte plaintext makes a 1116-character wrap. */
+export const DEFAULT_ROOM_BUCKET = 768
 /**
  * Default time-to-live: none. Ordinary NIP-17 clients do not set an
  * `expiration` tag, so a quiet wrap that carried one would stand out from

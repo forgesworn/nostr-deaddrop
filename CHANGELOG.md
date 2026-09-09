@@ -2,6 +2,8 @@
 
 ## 0.1.0
 
+- Defaults from measurement: pair bucket 512, room bucket 768, so wraps sit inside the size band of real gift wraps.
+
 - Review: keys are per direction and per room member, no expiration by default, wraps built at send time, random slot phase per client, replay dedupe, CSPRNG timestamp jitter.
 
 - Room drops: one drop key per epoch from a shared room key, `createRoomDrop`, `openRoomDrop`, `createRoomFiller`.

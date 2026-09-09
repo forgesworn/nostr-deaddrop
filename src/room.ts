@@ -5,7 +5,7 @@ import { hkdf } from '@noble/hashes/hkdf.js'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { bytesToHex, randomBytes, utf8ToBytes } from '@noble/hashes/utils.js'
 import { deriveDropKeyFromIkm, epochIndexAt, DEFAULT_EPOCH_SECONDS, type DropKey } from './derive.js'
-import { DEFAULT_BUCKET, DEFAULT_TTL_SECONDS, GIFT_WRAP_KIND, PAD_TAG, RumorTooLarge, randomPast, wrapTags, type DropOptions } from './wrap.js'
+import { DEFAULT_ROOM_BUCKET, DEFAULT_TTL_SECONDS, GIFT_WRAP_KIND, PAD_TAG, RumorTooLarge, randomPast, wrapTags, type DropOptions } from './wrap.js'
 
 /**
  * Drops for a room: everyone who holds the room key derives every member's
@@ -70,7 +70,7 @@ function roomPlaintext(inner: NostrEvent, bucket: number): string {
  */
 export function createRoomDrop(inner: NostrEvent, dropPublicKey: string, opts: DropOptions = {}): NostrEvent {
   const now = opts.now ?? (() => Math.floor(Date.now() / 1000))
-  const bucket = opts.bucket ?? DEFAULT_BUCKET
+  const bucket = opts.bucket ?? DEFAULT_ROOM_BUCKET
   const ttl = opts.ttlSeconds ?? DEFAULT_TTL_SECONDS
   const t = now()
   const randomKey = generateSecretKey()

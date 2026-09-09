@@ -99,6 +99,24 @@ would let them read forever. The pending queue is bounded at 256 drops and
 `publish` throws when it is full, which means the relay has not taken a
 slot in a long time and the person should be told.
 
+## What the relays actually do
+
+Measured 2026-09-09 over one day, unauthenticated REQ for kind 1059:
+
+| Relay | Wraps served | Note |
+|---|---|---|
+| nos.lol | about 15,500 | broadcast, paged at 500 |
+| relay.primal.net | over 20,000 | broadcast, paged at 500 |
+| relay.damus.io | 0 | serves no wraps to an unauthenticated pull |
+| nostr.wine | 0 | requires auth |
+| relay.nostr.band | 0 | serves no wraps |
+
+So a day's broadcast pull from one good relay is roughly 15,000 to 20,000
+wraps at about 1.2 KB each, 20 to 25 MB, which a box does without
+noticing and a phone on wifi can afford. Two of five large relays refuse
+the broadcast pull altogether; a client measures rather than assumes, and
+a circle's own boxes always serve it.
+
 ## What a relay learns
 
 A wrap signed by a throwaway key, addressed to a key it has never seen, with a fixed-size ciphertext and an expiration a week out. A pull of every gift wrap since a timestamp. Nothing links two wraps to each other or to any person.
@@ -121,7 +139,10 @@ each has a known answer:
   Then a stolen key costs one index of one pair's pattern, and nothing
   older or newer.
 - **The bucket.** One size per conversation, chosen once, never changed.
-  Fixed in the profile's conformance run, not per message.
+  The defaults (512 bytes for a pair, 768 for a room) come from a day of
+  real wraps on two public relays: median content 556 characters, 90th
+  percentile 2140. A pair drop at the default is 1796 characters, a room
+  drop 1116. A bigger bucket stands out; do not raise it without a reason.
 - **The relay.** Use relays that serve the gift-wrap stream by broadcast:
   your circle's boxes always do. Treat a relay that only serves wraps to
   their tagged key as a weaker path and show it as one.

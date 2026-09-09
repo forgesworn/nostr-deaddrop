@@ -13,6 +13,7 @@ export {
   GIFT_WRAP_KIND,
   PAD_TAG,
   DEFAULT_BUCKET,
+  DEFAULT_ROOM_BUCKET,
   DEFAULT_TTL_SECONDS,
   RumorTooLarge,
   padToBucket,
