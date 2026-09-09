@@ -41,6 +41,14 @@
     "type": "git",
     "url": "https://github.com/forgesworn/nostr-deaddrop"
   },
+  "homepage": "https://github.com/forgesworn/nostr-deaddrop#readme",
+  "bugs": {
+    "url": "https://github.com/forgesworn/nostr-deaddrop/issues"
+  },
+  "funding": {
+    "type": "lightning",
+    "url": "lightning:profusemeat89@walletofsatoshi.com"
+  },
   "engines": {
     "node": ">=22"
   },

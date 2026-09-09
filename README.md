@@ -1,5 +1,10 @@
 # nostr-deaddrop
 
+[![CI](https://github.com/forgesworn/nostr-deaddrop/actions/workflows/ci.yml/badge.svg)](https://github.com/forgesworn/nostr-deaddrop/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/nostr-deaddrop)](https://www.npmjs.com/package/nostr-deaddrop)
+[![licence: MIT](https://img.shields.io/badge/licence-MIT-blue.svg)](./LICENCE)
+[![GitHub Sponsors](https://img.shields.io/github/sponsors/TheCryptoDonkey?logo=githubsponsors&color=ea4aaa&label=Sponsor)](https://github.com/sponsors/TheCryptoDonkey)
+
 **Gift wraps nobody can trace, sent whether or not you have anything to say.**
 
 A NIP-59 gift wrap already hides the sender, pads the content and randomises the timestamp. One thing still gives the game away: the `p` tag names the recipient. This library replaces it.
