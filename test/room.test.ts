@@ -105,6 +105,29 @@ describe('QuietTransport', () => {
     expect(bob.describe()[0]!.url).toBe('wss://fake.test')
     alice.close(); bob.close()
   })
+  it('after a rekey, old drops open for old members and new drops do not', async () => {
+    let now = NOW
+    const relay = new FakeTransport()
+    const key2 = new Uint8Array(32).fill(8)
+    const mk = (k: Uint8Array) => new QuietTransport(relay, { roomKey: k, kinds: [1460], intervalSeconds: 60, now: () => now, schedule: () => () => {} })
+    const alice = mk(roomKey)
+    const removed = mk(roomKey)
+    const got: NostrEvent[] = []
+    removed.subscribe([{ kinds: [1460] }], (e) => got.push(e))
+    await alice.publish(chat('before'))
+    await alice.tick()
+    expect(got.length).toBe(1)
+    alice.rekey(key2)
+    now += 60
+    await alice.publish(chat('after'))
+    await alice.tick()
+    expect(relay.events.length).toBe(2)
+    expect(got.length).toBe(1)
+    const stillIn = mk(key2)
+    const got2: NostrEvent[] = []
+    stillIn.subscribe([{ kinds: [1460] }], (e) => got2.push(e))
+    expect(got2.map((e) => e.content)).toEqual(['after'])
+  })
   it('a transport with the wrong room key sees nothing', async () => {
     const relay = new FakeTransport()
     const alice = new QuietTransport(relay, { roomKey, kinds: [1460], intervalSeconds: 60, now: () => NOW, schedule: () => () => {} })

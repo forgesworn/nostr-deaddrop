@@ -81,7 +81,15 @@ which is where live signalling belongs, because a slot of delay ends a call.
 ```ts
 const quiet = new QuietTransport(relayPool, { roomKey, kinds: [1460], intervalSeconds: 3600 })
 // hand `quiet` to the room session exactly where the relay pool went
+quiet.rekey(nextRoomKey) // whenever the room rotates its key
 ```
+
+Pass the room's **current epoch key**, and call `rekey` when it rotates. A
+member removed at a rekey still holds the old key and can open that epoch's
+drops, and nothing after; deriving drops from a key that never rotates
+would let them read forever. The pending queue is bounded at 256 drops and
+`publish` throws when it is full, which means the relay has not taken a
+slot in a long time and the person should be told.
 
 ## What a relay learns
 

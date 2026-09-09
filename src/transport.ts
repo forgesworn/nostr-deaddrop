@@ -46,7 +46,9 @@ export interface QuietOptions extends DropOptions {
  */
 export class QuietTransport implements Transport {
   readonly quiet = true as const
-  private readonly ikm: Uint8Array
+  /** Real drops waiting for a slot. Bounded so a dead relay cannot grow memory without limit. */
+  static readonly MAX_PENDING = 256
+  private ikm: Uint8Array
   private readonly cadence: Cadence
   private readonly kinds: Set<number>
   private readonly epochSeconds: number
@@ -56,9 +58,11 @@ export class QuietTransport implements Transport {
   private tableEpoch = -1
   private closed = false
   private lastSlot = -1
+  private roomKey: Uint8Array
   private readonly fillerKind: number
 
   constructor(private readonly inner: Transport, private readonly opts: QuietOptions) {
+    this.roomKey = opts.roomKey
     this.ikm = roomIkm(opts.roomKey)
     this.kinds = new Set(opts.kinds)
     this.fillerKind = opts.kinds[0] ?? GIFT_WRAP_KIND
@@ -67,6 +71,20 @@ export class QuietTransport implements Transport {
     this.cadence = new Cadence({ intervalSeconds: opts.intervalSeconds, bucket: opts.bucket, ttlSeconds: opts.ttlSeconds, now: this.now })
     const schedule = opts.schedule ?? ((tick, everyMs) => { const h = setInterval(tick, everyMs); (h as unknown as { unref?: () => void }).unref?.(); return () => clearInterval(h) })
     this.stopTimer = schedule(() => { void this.tick() }, Math.max(1000, Math.min(opts.intervalSeconds * 1000, 30_000)))
+  }
+
+  /**
+   * The room moved to a new key: derive drop keys from it from now on. A
+   * member removed at the rekey still holds the old key and can open the
+   * old epoch's drops, and nothing after. Call this wherever the room's
+   * own protocol rotates its key; the queue is kept, because a queued drop
+   * was wrapped to the key current when it was written and its readers are
+   * the members of that epoch.
+   */
+  rekey(roomKey: Uint8Array): void {
+    this.roomKey = roomKey
+    this.ikm = roomIkm(roomKey)
+    this.tableEpoch = -1
   }
 
   describe(): { url: string; read: boolean; write: boolean }[] {
@@ -104,6 +122,7 @@ export class QuietTransport implements Transport {
   async publish(event: NostrEvent): Promise<void> {
     if (!this.kinds.has(event.kind)) return this.inner.publish(event)
     this.refresh()
+    if (this.cadence.pending >= QuietTransport.MAX_PENDING) throw new Error('quiet queue is full; the relay has not taken a slot in a long time')
     const drop = createRoomDrop(event, this.sendKey().publicKey, { bucket: this.opts.bucket, ttlSeconds: this.opts.ttlSeconds, now: this.now })
     this.cadence.enqueue(drop)
     // The queue drains on the cadence. A caller that wants a filler-shaped
