@@ -32,10 +32,14 @@ describe('room drops', () => {
     const inner = chat('hello room')
     const key = deriveRoomDropKey(roomKey, EPOCH, A_ID)
     const drop = createRoomDrop(inner, key.publicKey, { now: () => NOW })
+    // Nothing of the room is on the wire: not the author, not the room id, not
+    // the kind. The kind check reads the wrap's own fields rather than
+    // searching the base64, which can contain any four digits by chance.
     const wire = JSON.stringify(drop)
     expect(wire.includes(inner.pubkey)).toBe(false)
     expect(wire.includes('ab'.repeat(32))).toBe(false)
-    expect(wire.includes('1460')).toBe(false)
+    expect(drop.kind).toBe(1059)
+    expect(drop.tags.map((t) => t[0])).toEqual(['p'])
     expect(openRoomDrop(drop, key.privateKey)).toEqual(inner)
     expect(() => openRoomDrop(drop, generateSecretKey())).toThrow()
   })
