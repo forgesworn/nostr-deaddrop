@@ -1,7 +1,15 @@
 {
   "format": "nostr-deaddrop-known-answer-v1",
   "saltUtf8": "nostr-deaddrop/v1",
-  "info": "\"drop\" || 0x00 || u64be(epoch_index) || sender_pubkey (32 bytes)",
+  "info": "\"drop\" || 0x00 || u64be(epoch_index) || sender_pubkey (32 bytes) || u16be(counter)",
+  "maxPerEpoch": {
+    "pair": 64,
+    "room": 16
+  },
+  "room": {
+    "ikm": "0x10 || HKDF-SHA256(roomKey, salt = \"nostr-deaddrop/room/v1\", info = \"ikm\", 32) || 32 zero bytes",
+    "caseByte": 16
+  },
   "ikm": "case_byte || static_x || eph_x (65 bytes), as forgesworn-link RENDEZVOUS.md §2",
   "epochSeconds": 3600,
   "testOnlyKeys": {
@@ -22,8 +30,9 @@
       "ikmHex": "00c72057e75e1141b61b80f222d78f17a312d1950da578bae510a28c0f537801770000000000000000000000000000000000000000000000000000000000000000",
       "epochIndex": 498216,
       "sender": "3e0b147852ddd35607a06b4bb56ffc102e4d7b3ece162042c3f32f96a49c4613",
-      "dropPrivHex": "8f82aa2b33fd00ac513157ba870b136de91d14df73a0b49a541e554e6a2b8076",
-      "dropPubXOnly": "eba400a04a63e42794c551547a8bd0aa3a2d3a518b449b532e2f885b751162d6"
+      "counter": 0,
+      "dropPrivHex": "caabf2eac5c72b1a82a334ed7f0d7b031eb76a9665a75beb810520640541a6c4",
+      "dropPubXOnly": "373eed5916bc8be49549d4eebc10c84b226beb9904694eb56e907ec9c8ce453e"
     },
     {
       "name": "no-ephemeral-B-sends",
@@ -32,8 +41,9 @@
       "ikmHex": "00c72057e75e1141b61b80f222d78f17a312d1950da578bae510a28c0f537801770000000000000000000000000000000000000000000000000000000000000000",
       "epochIndex": 498216,
       "sender": "3e27f135286b183bb5dbc6e59a0ccc4a10750302b6ab68ac7495b3c5193012ec",
-      "dropPrivHex": "0444d6b590d75ff85e48d0f5c9ed40a584ccfa07f26d767b4302f7cb8cbb961d",
-      "dropPubXOnly": "ae589c52354d3931f7ccf51f63a1d4bda019e5c2d2a8c08eb29a2d2e5b745d6c"
+      "counter": 0,
+      "dropPrivHex": "767627b831df1ba2f89930f8410eeac48603d78d467b7da66fbdb6880528d63f",
+      "dropPubXOnly": "08402bdefeba3613706c7afc8684b3987e73439d05da775021bba76809367c40"
     },
     {
       "name": "both-ephemeral",
@@ -42,8 +52,9 @@
       "ikmHex": "02c72057e75e1141b61b80f222d78f17a312d1950da578bae510a28c0f537801773e0a7579af406dcd49cf4e477abeef28e52c9ac35c68e81c55ff3d6aad359aba",
       "epochIndex": 498216,
       "sender": "3e0b147852ddd35607a06b4bb56ffc102e4d7b3ece162042c3f32f96a49c4613",
-      "dropPrivHex": "ebd5fe8592cbc7e9f5d6b1b2ed21429c55a83ecd1ec46a5f1117c1fdef9c4e33",
-      "dropPubXOnly": "cc249fe3dd43c2880f3792165d3f18c5fb38fef111ec9be0015838a6b1a0b73b"
+      "counter": 0,
+      "dropPrivHex": "dc91e324712148b743c6511177b4c23e01bf67300b52cc8e41dc6b2526204521",
+      "dropPubXOnly": "6efecc4493145d08de58332c708bc25d87158dc72a1f8f51afc00774827d4150"
     },
     {
       "name": "one-ephemeral-A-carries",
@@ -52,8 +63,9 @@
       "ikmHex": "01c72057e75e1141b61b80f222d78f17a312d1950da578bae510a28c0f537801772456c0cdf38cd038890194e740b12b7dff52b59ca56ee2421120d0aa49fb177c",
       "epochIndex": 498216,
       "sender": "3e0b147852ddd35607a06b4bb56ffc102e4d7b3ece162042c3f32f96a49c4613",
-      "dropPrivHex": "1f2d9fd60c9084d3fbaff7bce10fff91dbc8027bf6dd0fe3046e12d8970f750f",
-      "dropPubXOnly": "bef4fa9c84fe40d743f9ef2368ac46fb882fc4e24c3ec26b100bbeb08a1c0598"
+      "counter": 0,
+      "dropPrivHex": "78db0bce829a1e314bcf059e1e34122c0c3c6f67a2e06dda97761862ea3f4cce",
+      "dropPubXOnly": "2cac254fdf82c946bc0afc9daec0b1461c89a07b8e156e11e5c7d0f2c2cb0934"
     },
     {
       "name": "next-epoch-differs",
@@ -62,8 +74,53 @@
       "ikmHex": "00c72057e75e1141b61b80f222d78f17a312d1950da578bae510a28c0f537801770000000000000000000000000000000000000000000000000000000000000000",
       "epochIndex": 498217,
       "sender": "3e0b147852ddd35607a06b4bb56ffc102e4d7b3ece162042c3f32f96a49c4613",
-      "dropPrivHex": "9f92370c66e6c042ef2e0a0722d5ef9e9eec2125470d9e244254b673c5339e05",
-      "dropPubXOnly": "af9d0ce06e038dbbbed1e726dabacae9996b73b5a60c5d03f50371c9fc242865"
+      "counter": 0,
+      "dropPrivHex": "0d324b69d7898434a9e5ec25535d2d528e590830b499877f90d5c603087f90b0",
+      "dropPubXOnly": "c5d2ac0a06fae457623dd850dce6b27b57fde96eae9175f05a97927c68954dd4"
+    },
+    {
+      "name": "counter-1-differs",
+      "caseByte": 0,
+      "case": "none",
+      "ikmHex": "00c72057e75e1141b61b80f222d78f17a312d1950da578bae510a28c0f537801770000000000000000000000000000000000000000000000000000000000000000",
+      "epochIndex": 498216,
+      "sender": "3e0b147852ddd35607a06b4bb56ffc102e4d7b3ece162042c3f32f96a49c4613",
+      "counter": 1,
+      "dropPrivHex": "668e2118da81ab965b39905f6be586199471c43e0683642177b1e510cce2638b",
+      "dropPubXOnly": "19669e5667c6a54266aaa1fd831d644a5088b4ea9d0bb692d32b5fb3252fce3a"
+    },
+    {
+      "name": "counter-63-last-of-pair",
+      "caseByte": 0,
+      "case": "none",
+      "ikmHex": "00c72057e75e1141b61b80f222d78f17a312d1950da578bae510a28c0f537801770000000000000000000000000000000000000000000000000000000000000000",
+      "epochIndex": 498216,
+      "sender": "3e0b147852ddd35607a06b4bb56ffc102e4d7b3ece162042c3f32f96a49c4613",
+      "counter": 63,
+      "dropPrivHex": "ae8c44eaedbe52e0267986bdd873acd1e5f25f5f97e3b63029bfbe1f6115dee0",
+      "dropPubXOnly": "edd2387b3fcc0d3ef4a1dee890f7cc1b7ce9935c1842a5b2e4682cbbfbd077d5"
+    }
+  ],
+  "roomCases": [
+    {
+      "name": "room-A-sends-counter-0",
+      "roomKeyHex": "0707070707070707070707070707070707070707070707070707070707070707",
+      "ikmHex": "10bc0014db3c278c74752900953233ad4d158a47d57aa32bb52784b9c7e9407c8e0000000000000000000000000000000000000000000000000000000000000000",
+      "epochIndex": 498216,
+      "member": "3e0b147852ddd35607a06b4bb56ffc102e4d7b3ece162042c3f32f96a49c4613",
+      "counter": 0,
+      "dropPrivHex": "942ad8f799389d0b30e9f05cffb6bac0db12cdff5a709ae8083e79d101bdaa3c",
+      "dropPubXOnly": "3a2e1bab3227f952ca3192829cfbcf95c85652257c0d259acc1501ab9b1af12a"
+    },
+    {
+      "name": "room-A-sends-counter-1",
+      "roomKeyHex": "0707070707070707070707070707070707070707070707070707070707070707",
+      "ikmHex": "10bc0014db3c278c74752900953233ad4d158a47d57aa32bb52784b9c7e9407c8e0000000000000000000000000000000000000000000000000000000000000000",
+      "epochIndex": 498216,
+      "member": "3e0b147852ddd35607a06b4bb56ffc102e4d7b3ece162042c3f32f96a49c4613",
+      "counter": 1,
+      "dropPrivHex": "ab2cc030ea5395ad6ed060cd81893dd04918792a1dca81a0ced0ecaeb3dabc16",
+      "dropPubXOnly": "c452a3244360449d66f2c9db5eb682ac5f5cdb98f0b0dd4a5885c6fef93243b2"
     }
   ]
 }

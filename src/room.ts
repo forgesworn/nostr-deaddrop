@@ -4,16 +4,16 @@ import type { NostrEvent } from 'nostr-tools/pure'
 import { hkdf } from '@noble/hashes/hkdf.js'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { bytesToHex, randomBytes, utf8ToBytes } from '@noble/hashes/utils.js'
-import { deriveDropKeyFromIkm, epochIndexAt, DEFAULT_EPOCH_SECONDS, type DropKey } from './derive.js'
-import { DEFAULT_ROOM_BUCKET, DEFAULT_TTL_SECONDS, GIFT_WRAP_KIND, PAD_TAG, RumorTooLarge, randomPast, wrapTags, type DropOptions } from './wrap.js'
+import { deriveDropKeyFromIkm, deriveDropEpoch, epochIndexAt, DEFAULT_EPOCH_SECONDS, MAX_PER_EPOCH_ROOM, type DropKey } from './derive.js'
+import { DEFAULT_ROOM_BUCKET, DEFAULT_TTL_SECONDS, GIFT_WRAP_KIND, PAD_TAG, RumorTooLarge, looksLikeWrap, randomPast, wrapTags, type DropOptions } from './wrap.js'
 
 /**
  * Drops for a room: everyone who holds the room key derives every member's
- * drop key per epoch, so a room's events can ride kind 1059 with no stable
- * room identifier on any relay. Keys are per member as well as per epoch,
- * so a relay never sees several senders post to one tag in one hour, which
- * would give away the room's size. The inner event is already encrypted to the room
- * key by the room's own protocol; this layer only hides that it exists.
+ * drop keys per epoch, so a room's events can ride kind 1059 with no stable
+ * room identifier on any relay. Keys are per member, per epoch and per
+ * counter, so no tag is ever used twice. The inner event is already
+ * encrypted to the room key by the room's own protocol; this layer only
+ * hides that it exists.
  *
  * The ikm keeps the 65-byte shape of the pair derivation with its own case
  * byte, so a room key and a pair secret can never derive the same drop key:
@@ -24,22 +24,23 @@ export const ROOM_CASE_BYTE = 0x10
 const ROOM_SALT = 'nostr-deaddrop/room/v1'
 
 export function roomIkm(roomKey: Uint8Array): Uint8Array {
-  if (roomKey.length !== 32) throw new Error('room key must be 32 bytes')
+  if (!(roomKey instanceof Uint8Array) || roomKey.length !== 32) throw new Error('room key must be 32 bytes')
   const ikm = new Uint8Array(65)
   ikm[0] = ROOM_CASE_BYTE
   ikm.set(hkdf(sha256, roomKey, utf8ToBytes(ROOM_SALT), utf8ToBytes('ikm'), 32), 1)
   return ikm
 }
 
-/** The drop key one member sends on in one epoch. `member` is the member's x-only pubkey as the room knows it. */
-export function deriveRoomDropKey(roomKey: Uint8Array, epochIndex: number, member: string): DropKey {
-  return deriveDropKeyFromIkm(roomIkm(roomKey), 'none', epochIndex, member)
+/** One drop key one member sends on in one epoch. `member` is the member's x-only pubkey as the room knows it. */
+export function deriveRoomDropKey(roomKey: Uint8Array, epochIndex: number, member: string, counter = 0): DropKey {
+  return deriveDropKeyFromIkm(roomIkm(roomKey), 'room', epochIndex, member, counter)
 }
 
-export function deriveRoomDropWindow(roomKey: Uint8Array, unixSeconds: number, member: string, epochSeconds = DEFAULT_EPOCH_SECONDS): DropKey[] {
+/** Every key one member may use across the previous, current and next epoch. */
+export function deriveRoomDropWindow(roomKey: Uint8Array, unixSeconds: number, member: string, epochSeconds = DEFAULT_EPOCH_SECONDS, max = MAX_PER_EPOCH_ROOM): DropKey[] {
   const ikm = roomIkm(roomKey)
   const e = epochIndexAt(unixSeconds, epochSeconds)
-  return [e - 1, e, e + 1].map((i) => deriveDropKeyFromIkm(ikm, 'none', i, member))
+  return [e - 1, e, e + 1].flatMap((i) => (i < 0 ? [] : deriveDropEpoch(ikm, 'room', i, member, max)))
 }
 
 const ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
@@ -88,11 +89,11 @@ export function createRoomDrop(inner: NostrEvent, dropPublicKey: string, opts: D
 
 /** Open a room drop and return the signed inner event, verified. */
 export function openRoomDrop(wrap: NostrEvent, dropPrivateKey: Uint8Array): NostrEvent {
-  if (wrap.kind !== GIFT_WRAP_KIND) throw new Error('not a gift wrap')
+  if (!looksLikeWrap(wrap)) throw new Error('not a gift wrap')
   const ck = nip44.getConversationKey(dropPrivateKey, wrap.pubkey)
   const parsed = JSON.parse(nip44.decrypt(wrap.content, ck)) as { e?: NostrEvent }
-  const inner = parsed.e
-  if (!inner || typeof inner !== 'object') throw new Error('no inner event')
+  const inner = parsed?.e
+  if (!inner || typeof inner !== 'object' || typeof inner.id !== 'string' || !Array.isArray(inner.tags)) throw new Error('no inner event')
   if (!verifyEvent(inner)) throw new Error('bad inner signature')
   return inner
 }

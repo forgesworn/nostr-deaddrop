@@ -4,38 +4,47 @@
 
 A NIP-59 gift wrap already hides the sender, pads the content and randomises the timestamp. One thing still gives the game away: the `p` tag names the recipient. This library replaces it.
 
-- **Rendezvous key.** Two people derive a fresh keypair per hour per direction from their shared secret. The wrap's `p` tag is that key. It is a valid key, so every relay stores the wrap, and neither identity appears on the event. Next hour, a different key; the reply comes on another, so no tag ever sees two senders.
-- **Cadence.** One wrap per interval whether or not anyone said anything, at a random phase per client so quiet clients do not all post on the same second. An empty slot is a filler wrap nobody can open. Real and filler are the same size and carry the same tags, which by default means no expiration, exactly like every other NIP-17 wrap.
-- **Broadcast receive.** Pull every recent kind 1059 and match tags against a local table. A relay sees a mirror syncing. Matching is a set lookup, no cryptography per event.
+- **Rendezvous keys.** Two people derive a fresh keypair per drop from their shared secret: one per hour, per direction, per message. The wrap's `p` tag is that key. It is a valid key, so every relay stores the wrap, and neither identity appears on the event. No tag is ever used twice, so a second message in an hour looks exactly like a filler.
+- **Cadence.** One wrap per interval whether or not anyone said anything, at a random phase per client so quiet clients do not all post on the same second. An empty slot is a filler wrap nobody can open. Real drops queue as seals and are wrapped when their slot comes, so real and filler have the same size, the same tags, the same created_at spread and, if set, the same expiration.
+- **Broadcast receive.** Pull every recent kind 1059, paged, and match tags against a local table that covers the whole lookback. A relay sees a mirror syncing. Matching is a set lookup, no cryptography per event.
 
-Over Tor, a watcher sees a Tor user posting one wrap an hour and a relay mirroring gift wraps, which is what thousands of NIP-17 users and every mirror already look like. It cannot tell whether you said anything, to whom, or when. It can tell you use Tor. Nothing here hides that.
+Over Tor, a watcher sees a Tor user posting one wrap per interval and a relay mirroring gift wraps. It cannot tell whether you said anything, to whom, or when. It can tell you use Tor, and a client that posts exactly one wrap per interval has a rhythm no human has: this hides *which* quiet client you are, not *that* you are one. Nothing here hides that.
 
 Byte-for-byte NIP-59. No new kinds, no new tags a relay has to know about, nothing a plain relay refuses.
 
 ## Use
 
 ```ts
-import { DropWatch, Cadence, createDrop, openDrop, stripPadding, broadcastFilter } from 'nostr-deaddrop'
+import { DropWatch, Cadence, createDropSeal, openDrop, stripPadding, broadcastFilter } from 'nostr-deaddrop'
 
 // Both sides hold the other's public key from a contact card or a bond.
 const watch = new DropWatch(myPrivateKey)
 watch.addPeer({ peerPublicKey: friendPub, ref: 'friend' })
 
-// Send: seal to the friend, wrap to this hour's drop key, queue for the next slot.
-const key = watch.sendKey(friendPub, now())
-const wrap = createDrop({ kind: 14, content: 'see you at eight', tags: [['p', friendPub]] }, myPrivateKey, friendPub, key.publicKey)
+// Send: seal to the friend now, queue it; the cadence wraps it at its slot to a key unused this hour.
+const seal = createDropSeal({ kind: 14, content: 'see you at eight', tags: [['p', friendPub]] }, myPrivateKey, friendPub)
 const cadence = new Cadence({ intervalSeconds: 3600 })
-cadence.enqueue(wrap)
+cadence.enqueue(seal, () => watch.sendKey(friendPub, now()).publicKey)
 setInterval(() => { const w = cadence.due(now()); if (w) publish(w) }, 30_000)
 
-// Receive: every wrap since last time, from anyone, over your carrier.
+// Receive: every wrap since last time, from anyone, over your carrier. The filter
+// reaches two days further back than `lastPull` for the created_at jitter; page it.
 for await (const ev of subscribe(broadcastFilter(lastPull))) {
   const m = watch.match(ev, now())
   if (!m) continue
-  const { rumor } = openDrop(ev, m.key.privateKey, myPrivateKey)
-  show(stripPadding(rumor), m.peer.ref)
+  let opened
+  try { opened = openDrop(ev, m.key.privateKey, myPrivateKey) } catch { continue }
+  if (!watch.remember(opened.rumor.id)) continue     // a replay, or an old seal re-wrapped
+  show(stripPadding(opened.rumor), m.peer.ref)
 }
 ```
+
+The table behind `match` holds every key every peer may use from two days
+back to an hour ahead: 64 keys an hour per peer, about a third of a second
+per peer to derive on a laptop, built once and then one epoch at a time.
+Pass `lookbackEpochs` to shorten it. A sender that has used all 64 keys in
+an hour throws `EpochExhausted`; the cadence then posts a filler and the
+drop waits for the next hour.
 
 ## Which key to use
 
@@ -51,22 +60,24 @@ else. Every `myPrivateKey` and `peerPublicKey` below means that key.
 Input key material is byte-identical to [forgesworn-link's rendezvous tags](https://github.com/forgesworn/forgesworn-link/blob/main/docs/RENDEZVOUS.md): `case_byte || static_x || eph_x`, where `static_x` is the x-coordinate of ECDH over the two static Nostr keys and `eph_x` mixes per-card ephemerals when either side carries one. A pair that already has Link cards derives drop keys from the material it already holds.
 
 ```
-scalar = HKDF-SHA256(ikm, salt = "nostr-deaddrop/v1", info = "drop" || 0x00 || u64be(epoch_index) || sender_pubkey, L = 32) mod n
+scalar = HKDF-SHA256(ikm, salt = "nostr-deaddrop/v1",
+                     info = "drop" || 0x00 || u64be(epoch_index) || sender_pubkey || u16be(counter), L = 32) mod n
 drop   = x-only(scalar · G)
 epoch_index = floor(unix_seconds / 3600)
+counter     = 0 .. 63 for a pair, 0 .. 15 for a room member; a sender never uses one twice in an epoch
 ```
 
-`sender_pubkey` is the x-only key of whoever sends on the key: the sender's rendezvous key for a pair, the member's key for a room.
+`sender_pubkey` is the x-only key of whoever sends on the key: the sender's rendezvous key for a pair, the member's key for a room. The counter is drawn at random from the unused ones, so the order of a sender's drops is not in the tags either.
 
-Both ends derive the same key with no ordering rule. A receiver keeps the previous, current and next epoch, so clock skew never drops a pair. Known-answer vectors are in `vectors/deaddrop.json`, using the same test keys as Link's so the `ikm` can be checked across both.
+Both ends derive the same keys with no ordering rule. A receiver keeps every key from the lookback (two days by default) to one epoch ahead, so neither clock skew nor a night asleep drops a pair; while cards are changing hands it also watches the other cases the pair could be in for the current three epochs, and a match says whether it came from one of those. Known-answer vectors are in `vectors/deaddrop.json`, using the same test keys as Link's so the `ikm` can be checked across both; they now include room keys and counters.
 
 ## Rooms
 
 A room whose members share a key does not need pairwise secrets. Everyone
-derives every member's drop key per epoch from the room key, under its own
-case byte so it can never collide with a pair's. Keys are per member so a
-relay never sees several senders on one tag, which would give away the
-room's size:
+derives every member's drop keys per epoch from the room key, under its own
+case byte so it can never collide with a pair's. Keys are per member and
+per counter (16 an hour each), so no tag is used twice and nothing on the
+wire counts the room:
 
 ```
 ikm  = 0x10 || HKDF-SHA256(roomKey, salt = "nostr-deaddrop/room/v1", info = "ikm", 32) || 32 zero bytes
@@ -89,15 +100,26 @@ quiet.rekey(nextRoomKey)   // whenever the room rotates its key
 quiet.setMembers(roster)   // whenever the roster changes
 ```
 
-Events queue and are wrapped when their slot comes, to the key current
-then, so a burst never stacks several wraps on one hour's tag.
+Events queue and are wrapped when their slot comes, each to a key unused
+this hour, so a burst never stacks several wraps on one tag. A slot's
+drop leaves the queue only once the relay has taken it: a rejected
+publish reports through `onError`, keeps the drop and retries the slot,
+so a relay outage delays and never discards. The pending queue is bounded
+at 256 drops and `publish` throws when it is full, which means nothing
+has been posted in a long time and the person should be told.
+
+Receiving is one broadcast pull per transport however many subscriptions
+ride on it: a live subscription from now plus a paged backfill over the
+lookback (two days by default, `pageSize` 500), both reaching two days
+further back for the created_at jitter. Delivered inner events are
+remembered by id after they open, so a replay or a re-wrapped old event
+is shown once.
 
 Pass the room's **current epoch key**, and call `rekey` when it rotates. A
-member removed at a rekey still holds the old key and can open that epoch's
+member removed at a rekey still holds the old key and can open that key's
 drops, and nothing after; deriving drops from a key that never rotates
-would let them read forever. The pending queue is bounded at 256 drops and
-`publish` throws when it is full, which means the relay has not taken a
-slot in a long time and the person should be told.
+would let them read forever. Anything still queued at a rekey goes out on
+the new key: a member removed at the rekey does not receive it.
 
 ## What the relays actually do
 
@@ -113,15 +135,16 @@ Measured 2026-09-09 over one day, unauthenticated REQ for kind 1059:
 
 So a day's broadcast pull from one good relay is roughly 15,000 to 20,000
 wraps at about 1.2 KB each, 20 to 25 MB, which a box does without
-noticing and a phone on wifi can afford. Two of five large relays refuse
-the broadcast pull altogether; a client measures rather than assumes, and
-a circle's own boxes always serve it.
+noticing and a phone on wifi can afford. Those relays serve 500 a page,
+which is why the transport pages. Two of five large relays refuse the
+broadcast pull altogether; a client measures rather than assumes, and a
+circle's own boxes always serve it.
 
 ## What a relay learns
 
-A wrap signed by a throwaway key, addressed to a key it has never seen, with a fixed-size ciphertext and an expiration a week out. A pull of every gift wrap since a timestamp. Nothing links two wraps to each other or to any person.
+A wrap signed by a throwaway key, addressed to a key it has never seen and will never see again, with a fixed-size ciphertext and, by default, no expiration. A pull of every gift wrap since a timestamp. Nothing on the events links two wraps to each other or to any person; what the connection leaks is the carrier's business, above.
 
-Where a relay serves kind 1059 only to the tagged key after NIP-42, `taggedFilter` asks by tag. Both ends hold the drop private key and can authenticate as it. That leaks the tag to that relay and nothing else, and callers should record that the weaker pull was used.
+Where a relay serves kind 1059 only to the tagged key after NIP-42, `taggedFilters` asks by tag, one request per tag. Both ends hold the drop private key and can authenticate as it. That relay learns each tag it is asked for; asked for many on one connection it would learn the peer count and could chain one client's tags across hours into an identity, so send each request over its own circuit, and record that the weaker pull was used.
 
 ## What the layers around it must do
 
@@ -156,9 +179,11 @@ cannot tell whether you spoke, to whom, or when.
 
 ## Security notes
 
-- The drop private key is a delivery capability: whoever holds it can open the wrap layer and see a seal they cannot open. Only the real recipient opens the seal.
-- Padding is a `pad` tag inside the rumor. Strip it before showing a message. Content larger than the bucket throws; pick a bigger bucket for the whole conversation, not per message.
-- Filler wraps are real gift wraps to random keys. They expire like everything else and cost a relay a few kilobytes an hour per sender.
+- The drop private key is a delivery capability: whoever holds it can open the wrap layer and see a seal they cannot open. The seal carries the sender's public key and signature, so a stolen drop key attributes that one wrap to its sender with proof; it opens nothing inside, and no other wrap.
+- `match` remembers nothing, because a relay that has seen a tag could otherwise burn it with junk carrying the same id. Open the wrap, then `remember(rumor.id)`; anything already remembered is a replay or an old seal re-wrapped by a key holder, and must not be shown twice.
+- Padding is a `pad` tag inside the rumor. Strip it before showing a message. Content larger than the bucket throws; pick a bigger bucket for the whole conversation, not per message. `padToBucket` needs `created_at`, because its width is part of the size.
+- Filler wraps are real gift wraps to random keys. They cost a relay a few kilobytes an hour per sender.
+- A restarted client forgets which counters it used this hour and may repeat one tag once. That is one repeated tag, not a repeated key.
 
 ## Licence
 

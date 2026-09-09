@@ -66,7 +66,9 @@ describe('drop key derivation', () => {
   })
   it('window covers previous, current and next epoch', () => {
     const w = deriveDropWindow({ myPrivateKey: A, peerPublicKey: pubB }, 1793577600, pubA)
-    expect(w.map((k) => k.epochIndex)).toEqual([EPOCH - 1, EPOCH, EPOCH + 1])
+    expect([...new Set(w.map((k) => k.epochIndex))]).toEqual([EPOCH - 1, EPOCH, EPOCH + 1])
+    expect(w.length).toBe(3 * 64)
+    expect(new Set(w.map((k) => k.publicKey)).size).toBe(w.length)
     expect(epochIndexAt(1793588888)).toBe(498219)
   })
 })

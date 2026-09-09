@@ -8,10 +8,21 @@ const N = 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141n
 
 export const SALT = 'nostr-deaddrop/v1'
 export const DEFAULT_EPOCH_SECONDS = 3600
+/**
+ * How many drops one sender may post on one pair in one epoch. Every drop
+ * gets its own key, so a relay never sees a tag twice; a receiver derives
+ * this many keys per epoch per peer. 64 an hour is a busy chat; a longer
+ * burst waits for the next epoch.
+ */
+export const MAX_PER_EPOCH_PAIR = 64
+/** The same for one member of a room. Rooms have many senders, so each gets fewer. */
+export const MAX_PER_EPOCH_ROOM = 16
+/** How far back a receiver derives keys by default: two days, the same distance the created_at jitter reaches. */
+export const DEFAULT_LOOKBACK_SECONDS = 2 * 24 * 3600
 
-/** Which ephemeral mix the pair used. Mirrors forgesworn-link RENDEZVOUS.md §2 case bytes. */
-export type EphemeralCase = 'none' | 'one' | 'both'
-const CASE_BYTE: Record<EphemeralCase, number> = { none: 0, one: 1, both: 2 }
+/** Which ephemeral mix the pair used. Mirrors forgesworn-link RENDEZVOUS.md §2 case bytes. `room` is a room key, case byte 0x10. */
+export type EphemeralCase = 'none' | 'one' | 'both' | 'room'
+const CASE_BYTE: Record<EphemeralCase, number> = { none: 0, one: 1, both: 2, room: 0x10 }
 
 export interface DropKey {
   /** 32-byte private scalar, held by both ends of the pair. */
@@ -19,6 +30,8 @@ export interface DropKey {
   /** x-only public key, hex. This is the `p` tag of a drop. */
   publicKey: string
   epochIndex: number
+  /** Which of the epoch's keys this is. A sender never uses one twice in an epoch. */
+  counter: number
   case: EphemeralCase
 }
 
@@ -33,8 +46,10 @@ export interface PairMaterial {
   peerEphemeralPublicKey?: string
 }
 
+const HEX64 = /^[0-9a-f]{64}$/
+
 function xOnlyToCompressed(hex: string): Uint8Array {
-  if (hex.length !== 64) throw new Error('expected 32-byte x-only public key hex')
+  if (typeof hex !== 'string' || !HEX64.test(hex)) throw new Error('expected 32-byte x-only public key as lower-case hex')
   return hexToBytes('02' + hex)
 }
 
@@ -85,55 +100,93 @@ export function pairIkm(m: PairMaterial): { ikm: Uint8Array; case: EphemeralCase
   return { ikm, case: c }
 }
 
+/**
+ * Every ikm a pair could be using right now, given the material this side
+ * holds. While cards are changing hands one side may have the other's
+ * ephemeral before the other has theirs, so the two sides derive different
+ * cases; a receiver that watches all of them misses nothing in between.
+ * The first entry is the case this side would send on.
+ */
+export function pairIkmCases(m: PairMaterial): { ikm: Uint8Array; case: EphemeralCase }[] {
+  const primary = pairIkm(m)
+  const out = [primary]
+  const seen = new Set([bytesToHex(primary.ikm)])
+  const variants: PairMaterial[] = [
+    { myPrivateKey: m.myPrivateKey, peerPublicKey: m.peerPublicKey },
+    { myPrivateKey: m.myPrivateKey, peerPublicKey: m.peerPublicKey, myEphemeralPrivateKey: m.myEphemeralPrivateKey },
+    { myPrivateKey: m.myPrivateKey, peerPublicKey: m.peerPublicKey, peerEphemeralPublicKey: m.peerEphemeralPublicKey },
+  ]
+  for (const v of variants) {
+    const r = pairIkm(v)
+    const h = bytesToHex(r.ikm)
+    if (!seen.has(h)) { seen.add(h); out.push(r) }
+  }
+  return out
+}
+
 export function epochIndexAt(unixSeconds: number, epochSeconds = DEFAULT_EPOCH_SECONDS): number {
+  if (!Number.isFinite(unixSeconds) || !(epochSeconds > 0)) throw new Error('bad clock')
   return Math.floor(unixSeconds / epochSeconds)
 }
 
 /**
- * Derive the drop keypair for one epoch and one direction.
+ * Derive one drop keypair: one epoch, one direction, one counter.
  *
  *   scalar = HKDF-SHA256(ikm, salt = "nostr-deaddrop/v1",
- *                        info = "drop" || 0x00 || u64be(epoch) || sender_pubkey, L = 32) mod n
+ *                        info = "drop" || 0x00 || u64be(epoch) || sender_pubkey || u16be(counter), L = 32) mod n
  *
  * `sender` is the x-only public key of whoever sends on this key, so the two
- * directions of a pair use two keys and a relay never sees two senders post
- * to one tag in one hour. Both ends compute both keys with no ordering rule.
- * The key is a delivery capability: whoever holds it can decrypt the wrap
- * layer and nothing inside it.
+ * directions of a pair use different keys. `counter` makes every drop in an
+ * epoch a different key, so a relay never sees the same tag twice and cannot
+ * tell a second message from a filler. Both ends compute every key with no
+ * ordering rule. The key is a delivery capability: whoever holds it can
+ * decrypt the wrap layer and nothing inside it.
  */
-export function deriveDropKey(m: PairMaterial, epochIndex: number, sender: string): DropKey {
+export function deriveDropKey(m: PairMaterial, epochIndex: number, sender: string, counter = 0): DropKey {
   const { ikm, case: c } = pairIkm(m)
-  return deriveDropKeyFromIkm(ikm, c, epochIndex, sender)
+  return deriveDropKeyFromIkm(ikm, c, epochIndex, sender, counter)
 }
 
-export function deriveDropKeyFromIkm(ikm: Uint8Array, c: EphemeralCase, epochIndex: number, sender: string): DropKey {
+export function deriveDropKeyFromIkm(ikm: Uint8Array, c: EphemeralCase, epochIndex: number, sender: string, counter = 0): DropKey {
+  if (!(ikm instanceof Uint8Array) || ikm.length !== 65) throw new Error('ikm must be 65 bytes')
+  if (!Number.isSafeInteger(epochIndex) || epochIndex < 0) throw new Error('epoch index must be a non-negative integer')
+  if (!Number.isInteger(counter) || counter < 0 || counter > 0xffff) throw new Error('counter must be an integer from 0 to 65535')
+  if (typeof sender !== 'string' || !HEX64.test(sender)) throw new Error('sender must be a 32-byte x-only public key as lower-case hex')
   const senderBytes = hexToBytes(sender)
-  if (senderBytes.length !== 32) throw new Error('sender must be a 32-byte x-only public key')
-  const info = new Uint8Array(4 + 1 + 8 + 32)
+  const info = new Uint8Array(4 + 1 + 8 + 32 + 2)
   info.set(utf8ToBytes('drop'), 0)
   info[4] = 0
   info.set(u64be(epochIndex), 5)
   info.set(senderBytes, 13)
+  info[45] = counter >> 8
+  info[46] = counter & 0xff
   let okm = hkdf(sha256, ikm, utf8ToBytes(SALT), info, 32)
   let scalar = bytesToBigInt(okm) % N
   // A zero scalar has probability 2^-256; loop rather than special-case it.
-  let counter = 0
+  let retry = 0
   while (scalar === 0n) {
-    counter += 1
+    retry += 1
     const info2 = new Uint8Array(info.length + 1)
     info2.set(info)
-    info2[info.length] = counter
+    info2[info.length] = retry
     okm = hkdf(sha256, ikm, utf8ToBytes(SALT), info2, 32)
     scalar = bytesToBigInt(okm) % N
   }
   const privateKey = bigIntTo32(scalar)
   const publicKey = bytesToHex(secp256k1.getPublicKey(privateKey, true).subarray(1))
-  return { privateKey, publicKey, epochIndex, case: c }
+  return { privateKey, publicKey, epochIndex, counter, case: c }
 }
 
-/** Drop keys a given sender uses for the previous, current and next epoch, so clock skew never drops a pair. */
-export function deriveDropWindow(m: PairMaterial, unixSeconds: number, sender: string, epochSeconds = DEFAULT_EPOCH_SECONDS): DropKey[] {
+/** Every key one sender may use in one epoch. */
+export function deriveDropEpoch(ikm: Uint8Array, c: EphemeralCase, epochIndex: number, sender: string, max: number): DropKey[] {
+  const out: DropKey[] = []
+  for (let k = 0; k < max; k++) out.push(deriveDropKeyFromIkm(ikm, c, epochIndex, sender, k))
+  return out
+}
+
+/** Every key a given sender may use across the previous, current and next epoch. */
+export function deriveDropWindow(m: PairMaterial, unixSeconds: number, sender: string, epochSeconds = DEFAULT_EPOCH_SECONDS, max = MAX_PER_EPOCH_PAIR): DropKey[] {
   const { ikm, case: c } = pairIkm(m)
   const e = epochIndexAt(unixSeconds, epochSeconds)
-  return [e - 1, e, e + 1].map((i) => deriveDropKeyFromIkm(ikm, c, i, sender))
+  return [e - 1, e, e + 1].flatMap((i) => (i < 0 ? [] : deriveDropEpoch(ikm, c, i, sender, max)))
 }

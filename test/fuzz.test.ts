@@ -48,14 +48,18 @@ describe('fuzz: pair drops', () => {
   })
   it('random events are never matched by a watch', () => {
     const r = rng(12)
-    const w = new DropWatch(bob)
+    const w = new DropWatch(bob, { lookbackEpochs: 1 })
     w.addPeer({ peerPublicKey: pubA })
     for (let i = 0; i < N; i++) {
       const ev = finalizeEvent({ kind: r() < 0.9 ? 1059 : Math.floor(r() * 40000), created_at: NOW, tags: [['p', getPublicKey(generateSecretKey())], ['x', 'y'.repeat(Math.floor(r() * 50))]], content: 'z'.repeat(Math.floor(r() * 200)) }, generateSecretKey())
       expect(w.match(ev, NOW)).toBeNull()
     }
-    const junk = { kind: 1059, tags: 'not-an-array' } as unknown as NostrEvent
-    expect(() => w.match({ ...junk, tags: [] } as NostrEvent, NOW)).not.toThrow()
+    // Relays send anything: a wrap with no tags array, a tag that is not a string, a null event.
+    expect(w.match({ kind: 1059, tags: 'not-an-array', content: 'x', pubkey: pubA } as unknown as NostrEvent, NOW)).toBeNull()
+    expect(w.match({ kind: 1059, tags: [['p', 5]], content: 'x', pubkey: pubA } as unknown as NostrEvent, NOW)).toBeNull()
+    expect(w.match({ kind: 1059, tags: [null], content: 'x', pubkey: pubA } as unknown as NostrEvent, NOW)).toBeNull()
+    expect(w.match(null as unknown as NostrEvent, NOW)).toBeNull()
+    expect(() => openDrop({ kind: 1059, tags: null, content: 'x', pubkey: pubA } as unknown as NostrEvent, key.privateKey, bob)).toThrow(/not a gift wrap/)
   })
   it('padToBucket refuses oversize and never produces a wrong size', () => {
     const r = rng(13)
