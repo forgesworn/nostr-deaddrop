@@ -2,7 +2,7 @@ import { finalizeEvent, generateSecretKey, getPublicKey, verifyEvent } from 'nos
 import { createRumor, createSeal } from 'nostr-tools/nip59'
 import * as nip44 from 'nostr-tools/nip44'
 import type { NostrEvent, UnsignedEvent } from 'nostr-tools/pure'
-import { randomBytes } from '@noble/hashes/utils.js'
+import { randomBytes, utf8ToBytes } from '@noble/hashes/utils.js'
 
 export const GIFT_WRAP_KIND = 1059
 export const PAD_TAG = 'pad'
@@ -71,7 +71,7 @@ export function padToBucket(event: Partial<UnsignedEvent>, bucket = DEFAULT_BUCK
     tags: [...tags, [PAD_TAG, '']],
     content: event.content ?? '',
   }
-  const base = Buffer.byteLength(JSON.stringify(probe), 'utf8')
+  const base = utf8ToBytes(JSON.stringify(probe)).length
   if (base > bucket) throw new RumorTooLarge(base, bucket)
   return { ...event, tags: [...tags, [PAD_TAG, randomAlnum(bucket - base)]] }
 }

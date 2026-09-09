@@ -52,6 +52,7 @@
     "nostr-tools": "2.23.9"
   },
   "devDependencies": {
+    "@types/node": "^24.13.3",
     "tsx": "^4.21.0",
     "typescript": "^5.7.0",
     "vitest": "^5.0.0"

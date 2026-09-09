@@ -57,7 +57,7 @@ function randomAlnum(n: number): string {
  */
 function roomPlaintext(inner: NostrEvent, bucket: number): string {
   const probe = JSON.stringify({ e: inner, [PAD_TAG]: '' })
-  const base = Buffer.byteLength(probe, 'utf8')
+  const base = utf8ToBytes(probe).length
   if (base > bucket) throw new RumorTooLarge(base, bucket)
   return JSON.stringify({ e: inner, [PAD_TAG]: randomAlnum(bucket - base) })
 }
