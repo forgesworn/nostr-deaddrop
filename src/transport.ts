@@ -1,11 +1,12 @@
 import { matchFilters } from 'nostr-tools/filter'
 import type { Filter } from 'nostr-tools/filter'
 import type { NostrEvent } from 'nostr-tools/pure'
+import { getPublicKey, generateSecretKey } from 'nostr-tools/pure'
 import { DEFAULT_EPOCH_SECONDS, DEFAULT_LOOKBACK_SECONDS, MAX_PER_EPOCH_ROOM, type DropKey } from './derive.js'
 import { roomIkm, createRoomDrop, createRoomFiller, openRoomDrop } from './room.js'
-import { randomPhase } from './cadence.js'
+import { randomOffset } from './cadence.js'
 import { CREATED_AT_JITTER, GIFT_WRAP_KIND, looksLikeWrap, type DropOptions } from './wrap.js'
-import { EpochExhausted, KeyTable } from './watch.js'
+import { EpochExhausted, KeyTable, type UsedCounters } from './watch.js'
 
 /**
  * The narrowest transport a room needs: publish, subscribe, close. The same
@@ -38,13 +39,23 @@ export interface QuietOptions extends DropOptions {
   lookbackSeconds?: number
   /** Page size for the backfill pull. Public relays serve at most 500 a page. */
   pageSize?: number
+  /** Most pages the backfill will walk before giving up on a relay that never runs dry. */
+  maxPages?: number
   /** Override the timer (tests). Returns a stop function. */
   schedule?: (tick: () => void, everyMs: number) => () => void
-  /** Seconds this client's slots are offset from the wall-clock boundary.
-   *  Random per client by default, so a relay does not see every quiet client
-   *  post on the same second. Fixed in tests. */
-  phaseSeconds?: number
-  /** Called when a slot's publish fails. The drop stays queued and the slot is retried. */
+  /**
+   * Where inside each slot this client posts, in seconds from the slot's
+   * start. Drawn fresh per slot by default, so posting times carry no fixed
+   * phase a relay could link across circuits. Tests pass `() => 0`.
+   */
+  slotOffset?: (slot: number) => number
+  /**
+   * The part of each epoch's counter space this device draws from, `[lo, hi)`
+   * inside `[0, 16)`. Two devices posting as one member must use disjoint
+   * ranges, or they will use one tag twice in an hour.
+   */
+  counterRange?: [number, number]
+  /** Called when a slot's publish fails (the drop stays queued and the same wrap is retried) or a queued event cannot be wrapped (it is dropped). */
   onError?: (error: unknown) => void
 }
 
@@ -61,7 +72,8 @@ interface QuietSub {
  * no tag used twice, and no gap in the stream when nobody is talking.
  *
  * What a relay sees: one kind 1059 per slot from this client, each to a key
- * it has never seen, and a pull of every 1059 since the lookback.
+ * it has never seen, at a fresh random moment inside each slot, and a pull
+ * of every 1059 since the lookback.
  */
 export class QuietTransport implements Transport {
   readonly quiet = true as const
@@ -73,15 +85,22 @@ export class QuietTransport implements Transport {
   private readonly epochSeconds: number
   private readonly lookbackSeconds: number
   private readonly pageSize: number
+  private readonly maxPages: number
   private readonly now: () => number
   private readonly stopTimer: () => void
   private closed = false
   private lastSlot = -1
+  private offsetSlot = -1
+  private offset = 0
+  private readonly slotOffset: (slot: number) => number
   private members: string[]
   private readonly member: string
-  private readonly phase: number
   private readonly fillerKind: number
+  private readonly range: [number, number]
   private readonly queue: NostrEvent[] = []
+  /** The wrap built for the slot in hand, kept until the relay takes it, so a retry re-posts the same event and burns no counter. */
+  private current?: { slot: number; wrap: NostrEvent; inner?: NostrEvent }
+  private inFlight = false
   private readonly delivered = new Set<string>()
   private readonly deliveredOrder: string[] = []
   private readonly quietSubs = new Set<QuietSub>()
@@ -98,16 +117,18 @@ export class QuietTransport implements Transport {
     this.epochSeconds = opts.epochSeconds ?? DEFAULT_EPOCH_SECONDS
     this.lookbackSeconds = opts.lookbackSeconds ?? DEFAULT_LOOKBACK_SECONDS
     this.pageSize = opts.pageSize ?? 500
+    this.maxPages = opts.maxPages ?? 1000
     this.now = opts.now ?? (() => Math.floor(Date.now() / 1000))
-    this.phase = opts.phaseSeconds ?? randomPhase(opts.intervalSeconds)
+    this.slotOffset = opts.slotOffset ?? (() => randomOffset(opts.intervalSeconds))
+    this.range = opts.counterRange ?? [0, MAX_PER_EPOCH_ROOM]
     this.table = new KeyTable<string>(this.epochSeconds, Math.ceil(this.lookbackSeconds / this.epochSeconds))
-    this.installMembers()
+    for (const m of this.members) this.table.set(m, this.sourceFor(m), m)
     const schedule = opts.schedule ?? ((tick, everyMs) => { const h = setInterval(tick, everyMs); (h as unknown as { unref?: () => void }).unref?.(); return () => clearInterval(h) })
     this.stopTimer = schedule(() => { this.tick().catch((e) => opts.onError?.(e)) }, Math.max(1000, Math.min(opts.intervalSeconds * 1000, 30_000)))
   }
 
-  private installMembers(): void {
-    for (const m of this.members) this.table.set(m, { ikm: this.ikm, case: 'room', sender: m, max: MAX_PER_EPOCH_ROOM }, m)
+  private sourceFor(m: string) {
+    return { ikm: this.ikm, case: 'room' as const, sender: m, max: MAX_PER_EPOCH_ROOM }
   }
 
   /**
@@ -120,16 +141,15 @@ export class QuietTransport implements Transport {
    */
   rekey(roomKey: Uint8Array): void {
     this.ikm = roomIkm(roomKey)
-    for (const m of this.members) this.table.remove(m)
-    this.installMembers()
+    for (const m of this.members) this.table.set(m, this.sourceFor(m), m)
   }
 
-  /** The roster changed. Incoming drops are matched on every member's keys. */
+  /** The roster changed. Only the difference is touched, so this member's used counters survive. */
   setMembers(members: string[]): void {
     const next = [...new Set(members.concat(this.member))]
     for (const m of this.members) if (!next.includes(m)) this.table.remove(m)
+    for (const m of next) if (!this.table.has(m)) this.table.set(m, this.sourceFor(m), m)
     this.members = next
-    this.installMembers()
   }
 
   describe(): { url: string; read: boolean; write: boolean }[] {
@@ -138,45 +158,97 @@ export class QuietTransport implements Transport {
 
   /** The drop key a send now would use: this member's own, this epoch, a counter unused so far. Throws when the epoch is exhausted. */
   sendKey(): DropKey {
-    return this.table.sendKey(this.member, this.ikm, 'room', this.member, MAX_PER_EPOCH_ROOM, this.now())
+    return this.table.sendKey(this.member, this.ikm, 'room', this.member, MAX_PER_EPOCH_ROOM, this.now(), this.range)
+  }
+
+  /** The counters used this epoch, to persist so a restart does not draw one twice. */
+  exportUsed(): Record<string, UsedCounters> {
+    return this.table.exportUsed()
+  }
+
+  /** Restore what `exportUsed` gave before a restart. */
+  importUsed(state: Record<string, UsedCounters>): void {
+    this.table.importUsed(state, () => this.ikm, this.now())
   }
 
   private slotIndex(unixSeconds: number): number {
-    return Math.floor((unixSeconds - this.phase) / this.opts.intervalSeconds)
+    return Math.floor(unixSeconds / this.opts.intervalSeconds)
+  }
+
+  private offsetFor(slot: number): number {
+    if (slot !== this.offsetSlot) {
+      this.offsetSlot = slot
+      const o = this.slotOffset(slot)
+      this.offset = Number.isFinite(o) ? Math.min(Math.max(0, Math.floor(o)), this.opts.intervalSeconds - 1) : 0
+    }
+    return this.offset
   }
 
   /**
-   * Post whatever the current slot owes: the oldest queued drop or a filler.
-   * The drop leaves the queue and the slot counts as served only once the
-   * relay has taken the wrap; a rejected publish leaves both as they were
-   * and reports through `onError`, so a relay outage delays and never
-   * discards. If this epoch's keys are used up, the slot gets a filler and
-   * the drop waits for the next epoch.
+   * Post whatever the current slot owes, once its moment inside the slot
+   * has come: the oldest queued drop or a filler. The wrap is built once
+   * per slot and kept; the drop leaves the queue and the slot counts as
+   * served only once the relay has taken it. A rejected publish reports
+   * through `onError` and the same wrap is posted again next tick, so a
+   * relay outage delays, never discards, and burns no counter. Two ticks
+   * never overlap. If this epoch's keys are used up, the slot gets a
+   * filler and the drop waits for the next epoch; a drop that cannot be
+   * wrapped for any other reason is discarded and reported.
    */
   async tick(): Promise<void> {
-    if (this.closed) return
-    const slot = this.slotIndex(this.now())
-    if (slot === this.lastSlot) return
-    const dropOpts: DropOptions = { bucket: this.opts.bucket, ttlSeconds: this.opts.ttlSeconds, now: this.now }
-    const inner = this.queue[0]
-    let key: DropKey | undefined
-    if (inner) {
-      try { key = this.sendKey() } catch (e) { if (!(e instanceof EpochExhausted)) throw e }
-    }
-    const wrap = inner && key ? createRoomDrop(inner, key.publicKey, dropOpts) : createRoomFiller(this.fillerKind, dropOpts)
+    if (this.closed || this.inFlight) return
+    const now = this.now()
+    const slot = this.slotIndex(now)
+    if (slot <= this.lastSlot) return
+    if (now < slot * this.opts.intervalSeconds + this.offsetFor(slot)) return
+    this.inFlight = true
     try {
-      await this.inner.publish(wrap)
-    } catch (e) {
-      this.opts.onError?.(e)
-      return
+      if (!this.current || this.current.slot !== slot) this.current = this.buildForSlot(slot)
+      try {
+        await this.inner.publish(this.current.wrap)
+      } catch (e) {
+        this.opts.onError?.(e)
+        return
+      }
+      this.lastSlot = slot
+      if (this.current.inner) this.queue.shift()
+      this.current = undefined
+    } finally {
+      this.inFlight = false
     }
-    this.lastSlot = slot
-    if (inner && key) this.queue.shift()
   }
 
+  private buildForSlot(slot: number): { slot: number; wrap: NostrEvent; inner?: NostrEvent } {
+    const dropOpts: DropOptions = { bucket: this.opts.bucket, ttlSeconds: this.opts.ttlSeconds, now: this.now }
+    while (this.queue.length > 0) {
+      const inner = this.queue[0]!
+      let key: DropKey
+      try {
+        key = this.sendKey()
+      } catch (e) {
+        if (e instanceof EpochExhausted) break
+        throw e
+      }
+      try {
+        return { slot, wrap: createRoomDrop(inner, key.publicKey, dropOpts), inner }
+      } catch (e) {
+        // The key is burnt, the message cannot be carried: drop it, say so, try the next.
+        this.queue.shift()
+        this.opts.onError?.(e)
+      }
+    }
+    return { slot, wrap: createRoomFiller(this.fillerKind, dropOpts) }
+  }
+
+  /**
+   * Queue an event of a quiet kind for the next free slot. An event too
+   * large for the bucket is refused here, to the caller, rather than
+   * discovered at its slot; the check wraps it to a throwaway key.
+   */
   async publish(event: NostrEvent): Promise<void> {
     if (!this.kinds.has(event.kind)) return this.inner.publish(event)
     if (this.queue.length >= QuietTransport.MAX_PENDING) throw new Error('quiet queue is full; the relay has not taken a slot in a long time')
+    createRoomDrop(event, getPublicKey(generateSecretKey()), { bucket: this.opts.bucket, now: this.now })
     this.queue.push(event)
     // The queue drains on the cadence, one per slot, wrapped when its slot
     // comes. A caller cannot make the stream burst by sending fast.
@@ -189,6 +261,8 @@ export class QuietTransport implements Transport {
   /** Match a wrap, open it, and deliver the inner event to every quiet subscription whose filters it matches. */
   private receive(wrap: NostrEvent, via?: string): void {
     if (!looksLikeWrap(wrap)) return
+    // A wrap already opened costs a lookup, not another decryption, when a relay replays it.
+    if (this.delivered.has('w:' + wrap.id)) return
     this.table.refresh(this.now())
     let hit
     for (const t of wrap.tags) {
@@ -199,54 +273,72 @@ export class QuietTransport implements Transport {
     if (!hit) return
     let inner: NostrEvent
     try { inner = openRoomDrop(wrap, hit.key.privateKey) } catch { return }
-    // Remembered only once it opened, and by the inner id: a stranger who
-    // saw a tag cannot burn it with junk, and a re-wrapped old seal is not
-    // shown twice.
-    if (this.delivered.has(inner.id)) return
-    this.delivered.add(inner.id)
-    this.deliveredOrder.push(inner.id)
-    if (this.deliveredOrder.length > 4096) this.delivered.delete(this.deliveredOrder.shift()!)
+    // Remembered only once it opened, by the wrap id and the inner id: a
+    // stranger who saw a tag cannot burn it with junk, and a re-wrapped old
+    // event is not shown twice.
+    this.keep('w:' + wrap.id)
+    if (this.delivered.has('i:' + inner.id)) return
+    this.keep('i:' + inner.id)
     for (const s of this.quietSubs) if (matchFilters(s.filters, inner)) s.onEvent(inner, via)
+  }
+
+  private keep(key: string): void {
+    if (this.delivered.has(key)) return
+    this.delivered.add(key)
+    this.deliveredOrder.push(key)
+    if (this.deliveredOrder.length > 8192) this.delivered.delete(this.deliveredOrder.shift()!)
   }
 
   /**
    * One broadcast pull per transport, however many subscriptions ride on
    * it: a live subscription from now, plus a paged backfill over the
    * lookback, both reaching two days further back for the created_at
-   * jitter. Pages walk `until` backwards until a page is empty, stops
-   * moving, or reaches the lookback, so a relay that caps pages at 500
-   * still yields everything.
+   * jitter. Pages walk `until` backwards, inclusive at the boundary second
+   * so nothing stamped in that second is skipped, and stop when a page
+   * brings nothing new, reaches the lookback, or the page cap is hit; the
+   * next page is scheduled on a fresh stack, so a relay that answers
+   * synchronously cannot overflow it.
    */
   private ensureBroadcast(): void {
     if (this.broadcastStop) return
     const now = this.now()
     const since = Math.max(0, now - this.lookbackSeconds - CREATED_AT_JITTER)
-    const stops: (() => void)[] = []
-    stops.push(this.inner.subscribe([{ kinds: [GIFT_WRAP_KIND], since: Math.max(0, now - CREATED_AT_JITTER) }], (w, via) => this.receive(w, via)))
-    const page = (until: number, lastOldest: number) => {
+    const stops = new Set<() => void>()
+    this.broadcastStop = () => { for (const s of stops) s() }
+    stops.add(this.inner.subscribe([{ kinds: [GIFT_WRAP_KIND], since: Math.max(0, now - CREATED_AT_JITTER) }], (w, via) => this.receive(w, via)))
+    let pages = 0
+    let boundaryIds = new Set<string>()
+    const page = (until: number) => {
       if (this.closed) return
-      let count = 0
+      if (pages >= this.maxPages) { this.finishBackfill(); return }
+      pages += 1
+      let fresh = 0
       let oldest = Infinity
+      const idsAtOldest = new Set<string>()
       let stop: (() => void) | undefined
       let ended = false
-      // Some transports signal EOSE synchronously inside subscribe, before `stop` exists.
-      const ended_ = () => {
+      const onEnd = () => {
         ended = true
-        stop?.()
-        const more = count > 0 && oldest < lastOldest && oldest > since
-        if (more) page(oldest - 1, oldest)
-        else this.finishBackfill()
+        if (stop) { stops.delete(stop); stop() }
+        const more = fresh > 0 && oldest > since && Number.isFinite(oldest)
+        if (!more) { this.finishBackfill(); return }
+        boundaryIds = idsAtOldest
+        // A fresh stack for the next page: a synchronous relay would otherwise recurse.
+        Promise.resolve().then(() => page(oldest)).catch((e) => this.opts.onError?.(e))
       }
       stop = this.inner.subscribe([{ kinds: [GIFT_WRAP_KIND], since, until, limit: this.pageSize }], (w, via) => {
-        count += 1
-        if (typeof w?.created_at === 'number' && w.created_at < oldest) oldest = w.created_at
+        if (!w || typeof w.id !== 'string' || boundaryIds.has(w.id)) return
+        fresh += 1
+        if (typeof w.created_at === 'number') {
+          if (w.created_at < oldest) { oldest = w.created_at; idsAtOldest.clear() }
+          if (w.created_at === oldest) idsAtOldest.add(w.id)
+        }
         this.receive(w, via)
-      }, ended_)
+      }, onEnd)
       if (ended) stop()
-      else stops.push(stop)
+      else stops.add(stop)
     }
-    page(now, Infinity)
-    this.broadcastStop = () => { for (const s of stops) s() }
+    page(now)
   }
 
   private finishBackfill(): void {
@@ -255,8 +347,16 @@ export class QuietTransport implements Transport {
   }
 
   subscribe(filters: Filter[], onEvent: (event: NostrEvent, via?: string) => void, onEose?: () => void): () => void {
-    const quietFilters = filters.filter((f) => f.kinds?.some((k) => this.kinds.has(k)))
-    const plainFilters = filters.filter((f) => !f.kinds?.some((k) => this.kinds.has(k)))
+    // A filter that mixes quiet and plain kinds is split, so neither side is lost.
+    const quietFilters: Filter[] = []
+    const plainFilters: Filter[] = []
+    for (const f of filters) {
+      if (!f.kinds) { plainFilters.push(f); continue }
+      const q = f.kinds.filter((k) => this.kinds.has(k))
+      const p = f.kinds.filter((k) => !this.kinds.has(k))
+      if (q.length) quietFilters.push({ ...f, kinds: q })
+      if (p.length) plainFilters.push({ ...f, kinds: p })
+    }
     const stops: (() => void)[] = []
     let eoses = 0
     const parts = (quietFilters.length ? 1 : 0) + (plainFilters.length ? 1 : 0)

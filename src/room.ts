@@ -76,12 +76,13 @@ export function createRoomDrop(inner: NostrEvent, dropPublicKey: string, opts: D
   const t = now()
   const randomKey = generateSecretKey()
   const ck = nip44.getConversationKey(randomKey, dropPublicKey)
+  const createdAt = randomPast(t)
   return finalizeEvent(
     {
       kind: GIFT_WRAP_KIND,
       content: nip44.encrypt(roomPlaintext(inner, bucket), ck),
-      created_at: randomPast(t),
-      tags: wrapTags(dropPublicKey, t, ttl),
+      created_at: createdAt,
+      tags: wrapTags(dropPublicKey, createdAt, ttl),
     },
     randomKey,
   )

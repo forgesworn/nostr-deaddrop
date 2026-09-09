@@ -1,4 +1,4 @@
-import { finalizeEvent, generateSecretKey, getPublicKey, verifyEvent } from 'nostr-tools/pure'
+import { finalizeEvent, generateSecretKey, getEventHash, getPublicKey, verifyEvent } from 'nostr-tools/pure'
 import { createRumor, createSeal } from 'nostr-tools/nip59'
 import * as nip44 from 'nostr-tools/nip44'
 import type { NostrEvent, UnsignedEvent } from 'nostr-tools/pure'
@@ -87,7 +87,9 @@ export function padToBucket(event: Partial<UnsignedEvent>, bucket = DEFAULT_BUCK
  */
 export function createDropSeal(event: Partial<UnsignedEvent>, senderPrivateKey: Uint8Array, recipientPublicKey: string, opts: DropOptions = {}): NostrEvent {
   const now = opts.now ?? (() => Math.floor(Date.now() / 1000))
-  const padded = padToBucket({ created_at: now(), kind: 14, ...event }, opts.bucket ?? DEFAULT_BUCKET)
+  // Only the four fields a rumor is made of: a caller's extra field (a `sig`, a `subject`) would otherwise change the wrap's size.
+  const four: Partial<UnsignedEvent> = { kind: event.kind ?? 14, created_at: event.created_at ?? now(), tags: event.tags ?? [], content: event.content ?? '' }
+  const padded = padToBucket(four, opts.bucket ?? DEFAULT_BUCKET)
   const rumor = createRumor(padded, senderPrivateKey)
   return createSeal(rumor, senderPrivateKey, recipientPublicKey)
 }
@@ -114,19 +116,21 @@ export function createDrop(
   return wrapSeal(createDropSeal(event, senderPrivateKey, recipientPublicKey, opts), dropPublicKey, opts)
 }
 
-export function wrapTags(dropPublicKey: string, now: number, ttl: number | undefined): string[][] {
-  return ttl === undefined ? [['p', dropPublicKey]] : [['p', dropPublicKey], ['expiration', String(now + ttl)]]
+/** The wrap's tags. An expiration, when asked for, counts from the jittered created_at, so it does not give the true post time away. */
+export function wrapTags(dropPublicKey: string, createdAt: number, ttl: number | undefined): string[][] {
+  return ttl === undefined ? [['p', dropPublicKey]] : [['p', dropPublicKey], ['expiration', String(createdAt + ttl)]]
 }
 
 function wrapToDrop(seal: NostrEvent, dropPublicKey: string, now: number, ttl: number | undefined): NostrEvent {
   const randomKey = generateSecretKey()
   const ck = nip44.getConversationKey(randomKey, dropPublicKey)
+  const createdAt = randomPast(now)
   return finalizeEvent(
     {
       kind: GIFT_WRAP_KIND,
       content: nip44.encrypt(JSON.stringify(seal), ck),
-      created_at: randomPast(now),
-      tags: wrapTags(dropPublicKey, now, ttl),
+      created_at: createdAt,
+      tags: wrapTags(dropPublicKey, createdAt, ttl),
     },
     randomKey,
   )
@@ -170,7 +174,9 @@ export function openDrop(wrap: NostrEvent, dropPrivateKey: Uint8Array, recipient
   const sealKey = nip44.getConversationKey(recipientPrivateKey, seal.pubkey)
   const rumor = JSON.parse(nip44.decrypt(seal.content, sealKey)) as UnsignedEvent & { id: string }
   if (!rumor || typeof rumor !== 'object' || rumor.pubkey !== seal.pubkey) throw new Error('rumor author is not the sealer')
-  if (typeof rumor.id !== 'string' || !Array.isArray(rumor.tags)) throw new Error('malformed rumor')
+  if (typeof rumor.id !== 'string' || !Array.isArray(rumor.tags) || typeof rumor.content !== 'string' || !Number.isSafeInteger(rumor.created_at) || !Number.isSafeInteger(rumor.kind)) throw new Error('malformed rumor')
+  // NIP-59: a rumor's id is its hash. A sender cannot choose it, so `remember(rumor.id)` cannot be gamed.
+  if (getEventHash({ kind: rumor.kind, pubkey: rumor.pubkey, created_at: rumor.created_at, tags: rumor.tags, content: rumor.content }) !== rumor.id) throw new Error('rumor id is not its hash')
   return { rumor, seal }
 }
 

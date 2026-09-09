@@ -1,7 +1,7 @@
 import type { NostrEvent } from 'nostr-tools/pure'
 import type { Filter } from 'nostr-tools/filter'
 import { getPublicKey } from 'nostr-tools/pure'
-import { randomBytes } from '@noble/hashes/utils.js'
+import { bytesToHex, randomBytes } from '@noble/hashes/utils.js'
 import {
   DEFAULT_EPOCH_SECONDS, DEFAULT_LOOKBACK_SECONDS, MAX_PER_EPOCH_PAIR,
   deriveDropKeyFromIkm, epochIndexAt, pairIkmCases,
@@ -16,7 +16,7 @@ export interface KeySource {
   case: EphemeralCase
   /** The x-only pubkey the sender puts in the derivation. */
   sender: string
-  /** How many keys per epoch this sender may use. */
+  /** How many keys per epoch this sender may use, 1 to 65536. */
   max: number
   /** Other ikms the sender might be on while cards change hands. Watched for the current epochs only. */
   alternates?: { ikm: Uint8Array; case: EphemeralCase }[]
@@ -35,32 +35,64 @@ export class EpochExhausted extends Error {
   }
 }
 
+/** The counters one sender has used in one epoch, for persisting across a restart. */
+export interface UsedCounters { epoch: number; counters: number[] }
+
+interface Source<R> {
+  source: KeySource
+  ref: R
+  ikmHex: string
+  /** Epochs whose primary keys are in the table. */
+  derived: Set<number>
+  /** Epochs whose alternate keys are in the table. */
+  altDerived: Set<number>
+  /** Every tag this source owns, for eviction without a table scan. */
+  tags: Set<string>
+}
+
 /**
  * The lookup table behind broadcast receive: every drop key every watched
  * sender may use from `lookbackEpochs` ago to one epoch ahead, keyed by
  * tag. Rebuilt incrementally as the clock moves: one new epoch derived,
  * one old one evicted. Alternate cases are derived for the previous,
  * current and next epoch only, where a card transition can be happening.
+ *
+ * The table also tracks which counters this process has used to send, per
+ * source and epoch, so no tag is drawn twice. That state survives a roster
+ * change that leaves the sender's material unchanged, and can be exported
+ * for persistence across a restart; two processes drawing from one space
+ * must partition it with `range`.
  */
 export class KeyTable<R = unknown> {
-  private readonly sources = new Map<string, { source: KeySource; ref: R; derived: Set<number> }>()
+  private readonly sources = new Map<string, Source<R>>()
   private table = new Map<string, Hit<R> & { id: string }>()
   private currentEpoch = -1
-  private readonly used = new Map<string, { epoch: number; counters: Set<number> }>()
+  private readonly used = new Map<string, { ikmHex: string; epoch: number; counters: Set<number> }>()
 
   constructor(readonly epochSeconds = DEFAULT_EPOCH_SECONDS, readonly lookbackEpochs = Math.ceil(DEFAULT_LOOKBACK_SECONDS / DEFAULT_EPOCH_SECONDS)) {
     if (!(epochSeconds > 0) || !Number.isInteger(lookbackEpochs) || lookbackEpochs < 1) throw new Error('bad epoch or lookback')
   }
 
+  /** Watch a source. Re-setting an id with the same ikm keeps its used counters; a new ikm forgets them, since the keys are new. */
   set(id: string, source: KeySource, ref: R): void {
+    if (!Number.isInteger(source.max) || source.max < 1 || source.max > 65536) throw new Error('max must be an integer from 1 to 65536')
+    const ikmHex = bytesToHex(source.ikm)
+    const prevUsed = this.used.get(id)
     this.remove(id)
-    this.sources.set(id, { source, ref, derived: new Set() })
+    if (prevUsed && prevUsed.ikmHex === ikmHex) this.used.set(id, prevUsed)
+    this.sources.set(id, { source, ref, ikmHex, derived: new Set(), altDerived: new Set(), tags: new Set() })
     if (this.currentEpoch >= 0) this.deriveMissing(this.currentEpoch)
   }
 
+  has(id: string): boolean {
+    return this.sources.has(id)
+  }
+
   remove(id: string): void {
-    if (!this.sources.delete(id)) return
-    for (const [tag, hit] of this.table) if (hit.id === id) this.table.delete(tag)
+    const s = this.sources.get(id)
+    if (!s) return
+    for (const tag of s.tags) this.table.delete(tag)
+    this.sources.delete(id)
     this.used.delete(id)
   }
 
@@ -74,12 +106,23 @@ export class KeyTable<R = unknown> {
     if (e === this.currentEpoch) return
     this.currentEpoch = e
     // Evict: primary keys older than the lookback, alternate keys outside the current three.
-    for (const [tag, hit] of this.table) {
-      const old = hit.alternate ? hit.key.epochIndex < e - 1 || hit.key.epochIndex > e + 1 : hit.key.epochIndex < e - this.lookbackEpochs
-      if (old) this.table.delete(tag)
+    for (const s of this.sources.values()) {
+      for (const tag of s.tags) {
+        const hit = this.table.get(tag)
+        if (!hit) { s.tags.delete(tag); continue }
+        const old = hit.alternate ? hit.key.epochIndex < e - 1 || hit.key.epochIndex > e + 1 : hit.key.epochIndex < e - this.lookbackEpochs
+        if (old) { this.table.delete(tag); s.tags.delete(tag) }
+      }
+      for (const i of [...s.derived]) if (i < e - this.lookbackEpochs) s.derived.delete(i)
+      for (const i of [...s.altDerived]) if (i < e - 1 || i > e + 1) s.altDerived.delete(i)
     }
-    for (const s of this.sources.values()) for (const i of [...s.derived]) if (i < e - this.lookbackEpochs) s.derived.delete(i)
     this.deriveMissing(e)
+  }
+
+  private put(s: Source<R>, id: string, key: DropKey, alternate: boolean): void {
+    if (this.table.has(key.publicKey)) return
+    this.table.set(key.publicKey, { ref: s.ref, key, alternate, id })
+    s.tags.add(key.publicKey)
   }
 
   private deriveMissing(e: number): void {
@@ -87,19 +130,14 @@ export class KeyTable<R = unknown> {
       for (let i = Math.max(0, e - this.lookbackEpochs); i <= e + 1; i++) {
         if (s.derived.has(i)) continue
         s.derived.add(i)
-        for (let k = 0; k < s.source.max; k++) {
-          const key = deriveDropKeyFromIkm(s.source.ikm, s.source.case, i, s.source.sender, k)
-          this.table.set(key.publicKey, { ref: s.ref, key, alternate: false, id })
-        }
+        for (let k = 0; k < s.source.max; k++) this.put(s, id, deriveDropKeyFromIkm(s.source.ikm, s.source.case, i, s.source.sender, k), false)
       }
-      // Alternates only for the current three epochs; re-derived each epoch, which is cheap.
-      for (const alt of s.source.alternates ?? []) {
-        for (const i of [e - 1, e, e + 1]) {
-          if (i < 0) continue
-          for (let k = 0; k < s.source.max; k++) {
-            const key = deriveDropKeyFromIkm(alt.ikm, alt.case, i, s.source.sender, k)
-            if (!this.table.has(key.publicKey)) this.table.set(key.publicKey, { ref: s.ref, key, alternate: true, id })
-          }
+      if (!s.source.alternates?.length) continue
+      for (const i of [e - 1, e, e + 1]) {
+        if (i < 0 || s.altDerived.has(i)) continue
+        s.altDerived.add(i)
+        for (const alt of s.source.alternates) {
+          for (let k = 0; k < s.source.max; k++) this.put(s, id, deriveDropKeyFromIkm(alt.ikm, alt.case, i, s.source.sender, k), true)
         }
       }
     }
@@ -115,22 +153,49 @@ export class KeyTable<R = unknown> {
 
   /**
    * A key to send on now for source `id`, using `ikm` and `sender` as the
-   * sender side derives them: a random counter never used in this epoch by
-   * this process. Throws EpochExhausted when all are used; the caller waits
-   * for the next epoch. A restart forgets which counters were used, so a
-   * restarted client may reuse one; that costs one repeated tag, not a key.
+   * sender side derives them: a random counter in `range` (all of `[0, max)`
+   * by default) never used in this epoch by this process. Throws
+   * EpochExhausted when all are used; the caller waits for the next epoch.
    */
-  sendKey(id: string, ikm: Uint8Array, c: EphemeralCase, sender: string, max: number, unixSeconds: number): DropKey {
+  sendKey(id: string, ikm: Uint8Array, c: EphemeralCase, sender: string, max: number, unixSeconds: number, range: [number, number] = [0, max]): DropKey {
     const e = epochIndexAt(unixSeconds, this.epochSeconds)
+    const [lo, hi] = range
+    if (!Number.isInteger(lo) || !Number.isInteger(hi) || lo < 0 || hi > max || hi <= lo) throw new Error('counter range must lie inside [0, max)')
+    const ikmHex = bytesToHex(ikm)
     let u = this.used.get(id)
-    if (!u || u.epoch !== e) { u = { epoch: e, counters: new Set() }; this.used.set(id, u) }
-    if (u.counters.size >= max) throw new EpochExhausted(e, max)
-    // Unbiased: reject bytes above the largest multiple of max.
-    const limit = 256 - (256 % max)
-    let counter: number
-    do { const b = randomBytes(1)[0]!; if (b >= limit) continue; counter = b % max } while (counter! === undefined || u.counters.has(counter))
+    if (!u || u.epoch !== e || u.ikmHex !== ikmHex) { u = { ikmHex, epoch: e, counters: new Set() }; this.used.set(id, u) }
+    let free = 0
+    for (let k = lo; k < hi; k++) if (!u.counters.has(k)) free += 1
+    if (free === 0) throw new EpochExhausted(e, hi - lo)
+    // Unbiased 16-bit draw over the range, rejecting the top slice.
+    const span = hi - lo
+    const limit = 65536 - (65536 % span)
+    let counter: number | undefined
+    while (counter === undefined || u.counters.has(counter)) {
+      const b = randomBytes(2)
+      const r = (b[0]! << 8) | b[1]!
+      if (r >= limit) continue
+      counter = lo + (r % span)
+    }
     u.counters.add(counter)
     return deriveDropKeyFromIkm(ikm, c, e, sender, counter)
+  }
+
+  /** The counters this process has used, per source, for persisting across a restart. */
+  exportUsed(): Record<string, UsedCounters> {
+    const out: Record<string, UsedCounters> = {}
+    for (const [id, u] of this.used) out[id] = { epoch: u.epoch, counters: [...u.counters] }
+    return out
+  }
+
+  /** Restore counters exported before a restart. Entries for another epoch or another ikm are ignored. */
+  importUsed(state: Record<string, UsedCounters>, ikmOf: (id: string) => Uint8Array | undefined, unixSeconds: number): void {
+    const e = epochIndexAt(unixSeconds, this.epochSeconds)
+    for (const [id, u] of Object.entries(state ?? {})) {
+      const ikm = ikmOf(id)
+      if (!ikm || !u || u.epoch !== e || !Array.isArray(u.counters)) continue
+      this.used.set(id, { ikmHex: bytesToHex(ikm), epoch: e, counters: new Set(u.counters.filter((k) => Number.isInteger(k) && k >= 0)) })
+    }
   }
 }
 
@@ -150,8 +215,14 @@ export interface DropWatchOptions {
   epochSeconds?: number
   /** How many epochs back to derive keys for. Wraps older than this are not matched. */
   lookbackEpochs?: number
-  /** How many delivered rumor ids to remember for `remember`. */
+  /** How many delivered rumor ids and opened wrap ids to remember. */
   rememberSeen?: number
+  /**
+   * The part of each epoch's counter space this device draws from, `[lo, hi)`
+   * inside `[0, 64)`. Two devices holding one rendezvous key must draw from
+   * disjoint ranges, or they will use one tag twice in an hour.
+   */
+  counterRange?: [number, number]
 }
 
 /**
@@ -172,6 +243,7 @@ export class DropWatch {
   private readonly seenOrder: string[] = []
   private readonly myPublicKey: string
   private readonly rememberSeen: number
+  private readonly range: [number, number]
 
   /** `myPrivateKey` is the holder's rendezvous key (a child of the root), never the identity key. */
   constructor(private readonly myPrivateKey: Uint8Array, opts: DropWatchOptions = {}) {
@@ -179,6 +251,7 @@ export class DropWatch {
     const epochSeconds = opts.epochSeconds ?? DEFAULT_EPOCH_SECONDS
     this.table = new KeyTable<Peer>(epochSeconds, opts.lookbackEpochs ?? Math.ceil(DEFAULT_LOOKBACK_SECONDS / epochSeconds))
     this.rememberSeen = opts.rememberSeen ?? 4096
+    this.range = opts.counterRange ?? [0, MAX_PER_EPOCH_PAIR]
   }
 
   addPeer(peer: Peer): void {
@@ -204,7 +277,17 @@ export class DropWatch {
   sendKey(peerPublicKey: string, unixSeconds: number): DropKey {
     const p = this.peers.get(peerPublicKey)
     if (!p) throw new Error('unknown peer')
-    return this.table.sendKey(peerPublicKey, p.ikm, p.case, this.myPublicKey, MAX_PER_EPOCH_PAIR, unixSeconds)
+    return this.table.sendKey(peerPublicKey, p.ikm, p.case, this.myPublicKey, MAX_PER_EPOCH_PAIR, unixSeconds, this.range)
+  }
+
+  /** The counters used this epoch, to persist so a restart does not draw one twice. */
+  exportUsed(): Record<string, UsedCounters> {
+    return this.table.exportUsed()
+  }
+
+  /** Restore what `exportUsed` gave before a restart. */
+  importUsed(state: Record<string, UsedCounters>, unixSeconds: number): void {
+    this.table.importUsed(state, (id) => this.peers.get(id)?.ikm, unixSeconds)
   }
 
   /** Every `p` tag this watch would accept right now. */
@@ -219,12 +302,14 @@ export class DropWatch {
   }
 
   /**
-   * Match by tag. Does not remember anything: a relay or a stranger who
-   * has seen a tag could otherwise burn it with junk. Open the wrap, and
-   * if it opens, call `remember(rumor.id)`.
+   * Match by tag. Does not remember anything about a wrap that has not
+   * opened: a relay or a stranger who has seen a tag could otherwise burn it
+   * with junk. A wrap whose id was remembered after a successful open is
+   * skipped here, so a relay replaying it costs a lookup, not a decryption.
    */
   match(event: NostrEvent, unixSeconds: number): Match | null {
     if (!looksLikeWrap(event)) return null
+    if (typeof event.id === 'string' && this.seen.has('w:' + event.id)) return null
     this.refresh(unixSeconds)
     for (const t of event.tags) {
       if (t[0] !== 'p' || typeof t[1] !== 'string') continue
@@ -235,16 +320,23 @@ export class DropWatch {
   }
 
   /**
-   * Record a delivered rumor id. Returns false if it was already delivered,
-   * which happens when a relay replays or when someone re-wraps an old seal
-   * to a current tag. Apps must not show a rumor twice.
+   * Record a delivered rumor id, and the wrap it came in, after the wrap
+   * opened. Returns false if the rumor was already delivered, which happens
+   * when a relay replays or when someone re-wraps an old seal to a current
+   * tag. Apps must not show a rumor twice.
    */
-  remember(rumorId: string): boolean {
-    if (this.seen.has(rumorId)) return false
-    this.seen.add(rumorId)
-    this.seenOrder.push(rumorId)
-    if (this.seenOrder.length > this.rememberSeen) this.seen.delete(this.seenOrder.shift()!)
+  remember(rumorId: string, wrapId?: string): boolean {
+    if (typeof wrapId === 'string') this.keep('w:' + wrapId)
+    if (this.seen.has('r:' + rumorId)) return false
+    this.keep('r:' + rumorId)
     return true
+  }
+
+  private keep(key: string): void {
+    if (this.seen.has(key)) return
+    this.seen.add(key)
+    this.seenOrder.push(key)
+    if (this.seenOrder.length > this.rememberSeen * 2) this.seen.delete(this.seenOrder.shift()!)
   }
 }
 

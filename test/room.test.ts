@@ -77,7 +77,7 @@ describe('QuietTransport', () => {
     let now = NOW
     const relay = new FakeTransport()
     const ticks: (() => void)[] = []
-    const mk = (member: string) => new QuietTransport(relay, { roomKey, member, members: MEMBERS, kinds: [1460], intervalSeconds: 60, lookbackSeconds: 7200, now: () => now, phaseSeconds: 0, schedule: (tick) => { ticks.push(tick); return () => {} } })
+    const mk = (member: string) => new QuietTransport(relay, { roomKey, member, members: MEMBERS, kinds: [1460], intervalSeconds: 60, lookbackSeconds: 7200, now: () => now, slotOffset: () => 0, schedule: (tick) => { ticks.push(tick); return () => {} } })
     const alice = mk(A_ID)
     const bob = mk(B_ID)
     const got: NostrEvent[] = []
@@ -118,7 +118,7 @@ describe('QuietTransport', () => {
     let now = NOW
     const relay = new FakeTransport()
     const key2 = new Uint8Array(32).fill(8)
-    const mk = (k: Uint8Array, member: string) => new QuietTransport(relay, { roomKey: k, member, members: MEMBERS, kinds: [1460], intervalSeconds: 60, lookbackSeconds: 7200, now: () => now, phaseSeconds: 0, schedule: () => () => {} })
+    const mk = (k: Uint8Array, member: string) => new QuietTransport(relay, { roomKey: k, member, members: MEMBERS, kinds: [1460], intervalSeconds: 60, lookbackSeconds: 7200, now: () => now, slotOffset: () => 0, schedule: () => () => {} })
     const alice = mk(roomKey, A_ID)
     const removed = mk(roomKey, B_ID)
     const got: NostrEvent[] = []
@@ -140,7 +140,7 @@ describe('QuietTransport', () => {
   it('a burst is wrapped when its slot comes, one per slot, on the key current then', async () => {
     let now = NOW
     const relay = new FakeTransport()
-    const alice = new QuietTransport(relay, { roomKey, member: A_ID, members: MEMBERS, kinds: [1460], intervalSeconds: 60, epochSeconds: 60, lookbackSeconds: 120, now: () => now, phaseSeconds: 0, schedule: () => () => {} })
+    const alice = new QuietTransport(relay, { roomKey, member: A_ID, members: MEMBERS, kinds: [1460], intervalSeconds: 60, epochSeconds: 60, lookbackSeconds: 120, now: () => now, slotOffset: () => 0, schedule: () => () => {} })
     await alice.publish(chat('one'))
     await alice.publish(chat('two'))
     expect(alice.pending).toBe(2)
@@ -154,8 +154,8 @@ describe('QuietTransport', () => {
   })
   it('a transport with the wrong room key sees nothing', async () => {
     const relay = new FakeTransport()
-    const alice = new QuietTransport(relay, { roomKey, member: A_ID, members: MEMBERS, kinds: [1460], intervalSeconds: 60, lookbackSeconds: 7200, now: () => NOW, phaseSeconds: 0, schedule: () => () => {} })
-    const other = new QuietTransport(relay, { roomKey: new Uint8Array(32).fill(9), member: B_ID, members: MEMBERS, kinds: [1460], intervalSeconds: 60, lookbackSeconds: 7200, now: () => NOW, phaseSeconds: 0, schedule: () => () => {} })
+    const alice = new QuietTransport(relay, { roomKey, member: A_ID, members: MEMBERS, kinds: [1460], intervalSeconds: 60, lookbackSeconds: 7200, now: () => NOW, slotOffset: () => 0, schedule: () => () => {} })
+    const other = new QuietTransport(relay, { roomKey: new Uint8Array(32).fill(9), member: B_ID, members: MEMBERS, kinds: [1460], intervalSeconds: 60, lookbackSeconds: 7200, now: () => NOW, slotOffset: () => 0, schedule: () => () => {} })
     const got: NostrEvent[] = []
     other.subscribe([{ kinds: [1460] }], (e) => got.push(e))
     await alice.publish(chat('secret'))

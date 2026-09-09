@@ -2,6 +2,18 @@
 
 ## 0.1.0
 
+- Second review pass (2026-09-09): ticks never overlap and a slot's wrap
+  is built once and kept, so a slow or failed publish neither double-posts
+  nor burns a key; used counters survive roster changes and can be exported
+  and restored across a restart, with per-device `counterRange`s; oversize
+  events refused at `publish`; each slot posts at a fresh random offset
+  rather than a fixed phase; opened wraps skipped on replay; the pager is
+  inclusive at the boundary second, capped, and never recurses on the
+  stack; mixed filters split; seals built from the four rumor fields only;
+  rumor ids checked against their hash; expiration counted from the
+  jittered created_at; `max` above 65536 refused and the counter draw
+  widened. README states what "no tag twice" rests on.
+
 - Independent review (2026-09-09), all findings applied: a counter in the
   derivation so no tag is ever used twice (64 an hour per pair sender, 16
   per room member, drawn at random); the pair cadence queues seals and

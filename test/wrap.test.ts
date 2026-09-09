@@ -55,8 +55,9 @@ describe('drops', () => {
     expect(drop('hi').wrap.tags.length).toBe(1)
     const a = drop('hi', 3600).wrap
     const filler = createFiller({ now: () => NOW, ttlSeconds: 3600 })
-    expect(exp(a)).toBe(String(NOW + 3600))
-    expect(exp(filler)).toBe(exp(a))
+    // Counted from the jittered created_at, not from the true post time.
+    expect(exp(a)).toBe(String(a.created_at + 3600))
+    expect(exp(filler)).toBe(String(filler.created_at + 3600))
   })
   it('real and filler wraps are the same size', () => {
     const sizes = new Set<number>()

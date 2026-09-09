@@ -4,11 +4,11 @@
 
 A NIP-59 gift wrap already hides the sender, pads the content and randomises the timestamp. One thing still gives the game away: the `p` tag names the recipient. This library replaces it.
 
-- **Rendezvous keys.** Two people derive a fresh keypair per drop from their shared secret: one per hour, per direction, per message. The wrap's `p` tag is that key. It is a valid key, so every relay stores the wrap, and neither identity appears on the event. No tag is ever used twice, so a second message in an hour looks exactly like a filler.
-- **Cadence.** One wrap per interval whether or not anyone said anything, at a random phase per client so quiet clients do not all post on the same second. An empty slot is a filler wrap nobody can open. Real drops queue as seals and are wrapped when their slot comes, so real and filler have the same size, the same tags, the same created_at spread and, if set, the same expiration.
+- **Rendezvous keys.** Two people derive a fresh keypair per drop from their shared secret: one per hour, per direction, per message. The wrap's `p` tag is that key. It is a valid key, so every relay stores the wrap, and neither identity appears on the event. A sender draws each key from the hour's unused ones, so a second message in an hour looks exactly like a filler; what that promise rests on is below.
+- **Cadence.** One wrap per interval whether or not anyone said anything, each posted at a fresh random moment inside its interval, so a client's posting times carry no phase a relay could link across circuits. An empty slot is a filler wrap nobody can open. Real drops queue as seals and are wrapped when their slot comes, so real and filler have the same size, the same tags, the same created_at spread and, if set, the same expiration, which counts from the jittered created_at and so gives no true post time away.
 - **Broadcast receive.** Pull every recent kind 1059, paged, and match tags against a local table that covers the whole lookback. A relay sees a mirror syncing. Matching is a set lookup, no cryptography per event.
 
-Over Tor, a watcher sees a Tor user posting one wrap per interval and a relay mirroring gift wraps. It cannot tell whether you said anything, to whom, or when. It can tell you use Tor, and a client that posts exactly one wrap per interval has a rhythm no human has: this hides *which* quiet client you are, not *that* you are one. Nothing here hides that.
+Over Tor, a watcher sees a Tor user posting one wrap per interval and a relay mirroring gift wraps. It cannot tell whether you said anything, to whom, or when. It can tell you use Tor, and a client that posts exactly one wrap per interval has a rhythm no human has: this hides *which* quiet client you are, not *that* you are one. Nothing here hides that. What remains, in the profile's own words: a watcher with months and deep inspection can still tell you are in a crowd, and a global passive observer with patience against a small circle is not answered here.
 
 Byte-for-byte NIP-59. No new kinds, no new tags a relay has to know about, nothing a plain relay refuses.
 
@@ -40,11 +40,20 @@ for await (const ev of subscribe(broadcastFilter(lastPull))) {
 ```
 
 The table behind `match` holds every key every peer may use from two days
-back to an hour ahead: 64 keys an hour per peer, about a third of a second
-per peer to derive on a laptop, built once and then one epoch at a time.
-Pass `lookbackEpochs` to shorten it. A sender that has used all 64 keys in
-an hour throws `EpochExhausted`; the cadence then posts a filler and the
-drop waits for the next hour.
+back to an hour ahead: 64 keys an hour per peer, about a second per peer
+to derive on a laptop and roughly 1.3 KB per key in memory, built once and
+then one epoch at a time. Pass `lookbackEpochs` to shorten it. A sender
+that has used all 64 keys in an hour throws `EpochExhausted`; the cadence
+then posts a filler and the drop waits for the next hour.
+
+**What "no tag twice" rests on.** The used counters live in this process.
+A restart forgets them, and two devices holding one rendezvous key draw
+independently, so either can repeat a tag in the hour it happened, and a
+repeated tag is the one thing that marks two wraps as real and related.
+Two rules keep the promise: give each device its own `counterRange` (the
+phone `[0, 32)`, the laptop `[32, 64)`), and persist `exportUsed()` and
+restore it with `importUsed()` across a restart. A client that does
+neither has this hour's tags at risk, and nothing older or newer.
 
 ## Which key to use
 
@@ -101,19 +110,29 @@ quiet.setMembers(roster)   // whenever the roster changes
 ```
 
 Events queue and are wrapped when their slot comes, each to a key unused
-this hour, so a burst never stacks several wraps on one tag. A slot's
-drop leaves the queue only once the relay has taken it: a rejected
-publish reports through `onError`, keeps the drop and retries the slot,
-so a relay outage delays and never discards. The pending queue is bounded
-at 256 drops and `publish` throws when it is full, which means nothing
-has been posted in a long time and the person should be told.
+this hour, so a burst never stacks several wraps on one tag. A slot's wrap
+is built once and kept, and its drop leaves the queue only once the relay
+has taken it: a rejected publish reports through `onError` and the same
+wrap is posted again next tick, so a relay outage delays, never discards,
+and burns no key. Ticks never overlap. An event too big for the bucket is
+refused by `publish` itself, to the caller, so it can never sit at the
+head of the queue. The pending queue is bounded at 256 drops and `publish`
+throws when it is full, which means nothing has been posted in a long
+time and the person should be told. A roster change keeps this member's
+used counters; a rekey forgets them, since the keys are new. Two devices
+posting as one member need disjoint `counterRange`s, `[0, 8)` and
+`[8, 16)`, and `exportUsed` and `importUsed` carry counters across a
+restart.
 
 Receiving is one broadcast pull per transport however many subscriptions
 ride on it: a live subscription from now plus a paged backfill over the
-lookback (two days by default, `pageSize` 500), both reaching two days
-further back for the created_at jitter. Delivered inner events are
-remembered by id after they open, so a replay or a re-wrapped old event
-is shown once.
+lookback (two days by default, `pageSize` 500, at most `maxPages` pages),
+both reaching two days further back for the created_at jitter. Pages are
+inclusive at the boundary second so nothing stamped there is skipped, and
+stop when a page brings nothing new. Opened wraps and delivered inner
+events are remembered by id, so a replay costs a lookup and a re-wrapped
+old event is shown once. A filter that mixes a quiet kind with a plain one
+is split and both sides delivered.
 
 Pass the room's **current epoch key**, and call `rekey` when it rotates. A
 member removed at a rekey still holds the old key and can open that key's
@@ -183,7 +202,8 @@ cannot tell whether you spoke, to whom, or when.
 - `match` remembers nothing, because a relay that has seen a tag could otherwise burn it with junk carrying the same id. Open the wrap, then `remember(rumor.id)`; anything already remembered is a replay or an old seal re-wrapped by a key holder, and must not be shown twice.
 - Padding is a `pad` tag inside the rumor. Strip it before showing a message. Content larger than the bucket throws; pick a bigger bucket for the whole conversation, not per message. `padToBucket` needs `created_at`, because its width is part of the size.
 - Filler wraps are real gift wraps to random keys. They cost a relay a few kilobytes an hour per sender.
-- A restarted client forgets which counters it used this hour and may repeat one tag once. That is one repeated tag, not a repeated key.
+- `Cadence.due` hands the caller one wrap per slot and forgets it; if the relay refuses it, post that same wrap again rather than asking for another. A slot that passed while the caller slept is skipped, not caught up, so the rate never bursts.
+- The rumor's id is checked against its hash on open, so the id an app deduplicates on cannot be chosen by the sender.
 
 ## Licence
 

@@ -66,7 +66,7 @@ describe('DropWatch', () => {
 
 describe('Cadence', () => {
   it('emits exactly one wrap per slot, real first, filler otherwise', () => {
-    const c = new Cadence({ intervalSeconds: 60, now: () => NOW, phaseSeconds: 0 })
+    const c = new Cadence({ intervalSeconds: 60, now: () => NOW, slotOffset: () => 0 })
     const key = getPublicKey(generateSecretKey())
     const seal = createDropSeal({ content: 'real' }, alice, getPublicKey(bob), { now: () => NOW })
     c.enqueue(seal, () => key)

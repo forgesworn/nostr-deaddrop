@@ -42,7 +42,7 @@ class Relay {
 }
 
 const quiet = (relay: Relay, member: string, extra: Partial<ConstructorParameters<typeof QuietTransport>[1]> = {}, now = () => NOW) =>
-  new QuietTransport(relay, { roomKey, member, members: [A_ID, B_ID], kinds: [1460], intervalSeconds: 60, lookbackSeconds: 7200, phaseSeconds: 0, now, schedule: () => () => {}, ...extra })
+  new QuietTransport(relay, { roomKey, member, members: [A_ID, B_ID], kinds: [1460], intervalSeconds: 60, lookbackSeconds: 7200, slotOffset: () => 0, now, schedule: () => () => {}, ...extra })
 
 describe('P0: no tag is ever used twice', () => {
   it('a burst inside one epoch lands on distinct tags, as fillers do', async () => {
@@ -85,15 +85,16 @@ describe('P0: no tag is ever used twice', () => {
 
 describe('P1: the pair cadence wraps at the slot', () => {
   it('real and filler carry the same expiration and the same created_at distribution', () => {
-    const c = new Cadence({ intervalSeconds: 60, ttlSeconds: 86400, phaseSeconds: 0 })
+    const c = new Cadence({ intervalSeconds: 60, ttlSeconds: 86400, slotOffset: () => 0 })
     const key = getPublicKey(generateSecretKey())
     const seal = createDropSeal({ content: 'queued an hour early' }, alice, pubB, { now: () => NOW - 3600 })
     c.enqueue(seal, () => key)
     const real = c.due(NOW)!
     const filler = c.due(NOW + 60)!
     const exp = (e: NostrEvent) => Number(e.tags.find((t) => t[0] === 'expiration')![1])
-    expect(exp(real) - NOW).toBe(86400)
-    expect(exp(filler) - (NOW + 60)).toBe(86400)
+    // The expiration counts from the jittered created_at on both, so it gives neither the true post time away.
+    expect(exp(real) - real.created_at).toBe(86400)
+    expect(exp(filler) - filler.created_at).toBe(86400)
     expect(real.created_at).toBeLessThanOrEqual(NOW)
     expect(real.created_at).toBeGreaterThan(NOW - CREATED_AT_JITTER)
     expect(real.content.length).toBe(filler.content.length)
@@ -104,7 +105,7 @@ describe('P1: the pair cadence wraps at the slot', () => {
     const r = new DropWatch(bob, { lookbackEpochs: 1 })
     r.addPeer({ peerPublicKey: pubA })
     let asked = 0
-    const c = new Cadence({ intervalSeconds: 3600, phaseSeconds: 0 })
+    const c = new Cadence({ intervalSeconds: 3600, slotOffset: () => 0 })
     c.enqueue(createDropSeal({ content: 'later' }, alice, pubB, { now: () => NOW }), () => { asked += 1; return w.sendKey(pubB, NOW + 3 * 3600).publicKey })
     expect(asked).toBe(0)
     const wrap = c.due(NOW + 3 * 3600)!
@@ -113,9 +114,9 @@ describe('P1: the pair cadence wraps at the slot', () => {
   })
   it('the cadence has a phase and a bound', () => {
     const c = new Cadence({ intervalSeconds: 60 })
-    expect(c.phaseSeconds).toBeGreaterThanOrEqual(0)
-    expect(c.phaseSeconds).toBeLessThan(60)
-    const b = new Cadence({ intervalSeconds: 60, phaseSeconds: 0 })
+    expect(c.nextSlotAt(NOW)).toBeGreaterThanOrEqual(NOW)
+    expect(c.nextSlotAt(NOW)).toBeLessThan(NOW + 120)
+    const b = new Cadence({ intervalSeconds: 60, slotOffset: () => 0 })
     const seal = createDropSeal({ content: 'x' }, alice, pubB, { now: () => NOW })
     for (let i = 0; i < Cadence.MAX_PENDING; i++) b.enqueue(seal, () => pubB)
     expect(() => b.enqueue(seal, () => pubB)).toThrow(/full/)
@@ -185,6 +186,7 @@ describe('P1: the backfill is paged', () => {
     let eose = 0
     const b = quiet(relay, B_ID, { pageSize: 100 })
     b.subscribe([{ kinds: [1460] }], (e) => got.push(e), () => { eose += 1 })
+    await new Promise((r) => setTimeout(r, 0))   // pages chain on fresh stacks
     expect(got.map((e) => e.content)).toEqual(['buried'])
     expect(eose).toBe(1)
   })
