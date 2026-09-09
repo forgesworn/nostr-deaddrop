@@ -8,13 +8,18 @@ export const GIFT_WRAP_KIND = 1059
 export const PAD_TAG = 'pad'
 /** Default rumor size in bytes of serialised JSON. Every rumor is padded to exactly this. */
 export const DEFAULT_BUCKET = 2048
-/** Default time-to-live for every wrap, real or filler, in seconds. */
-export const DEFAULT_TTL_SECONDS = 7 * 24 * 3600
+/**
+ * Default time-to-live: none. Ordinary NIP-17 clients do not set an
+ * `expiration` tag, so a quiet wrap that carried one would stand out from
+ * the crowd it hides in. Set `ttlSeconds` only on a relay you run yourself.
+ */
+export const DEFAULT_TTL_SECONDS: number | undefined = undefined
 
 export interface DropOptions {
   /** Serialised rumor length every drop is padded to. Same for real and filler. */
   bucket?: number
-  /** NIP-40 expiration, seconds from now. Same for real and filler. */
+  /** NIP-40 expiration, seconds from now, same for real and filler. Off by
+   *  default so the wrap looks like every other NIP-17 wrap. */
   ttlSeconds?: number
   /** Override the clock (tests). */
   now?: () => number
@@ -35,9 +40,11 @@ function randomAlnum(n: number): string {
   return s
 }
 
-/** NIP-59 randomises created_at up to two days into the past. */
-function randomPast(now: number): number {
-  return now - Math.floor(Math.random() * 2 * 24 * 3600)
+/** NIP-59 randomises created_at up to two days into the past. CSPRNG, not Math.random. */
+export function randomPast(now: number): number {
+  const b = randomBytes(4)
+  const r = ((b[0]! << 24) | (b[1]! << 16) | (b[2]! << 8) | b[3]!) >>> 0
+  return now - Math.floor((r / 0x100000000) * 2 * 24 * 3600)
 }
 
 /**
@@ -82,7 +89,11 @@ export function createDrop(
   return wrapToDrop(seal, dropPublicKey, t, ttl)
 }
 
-function wrapToDrop(seal: NostrEvent, dropPublicKey: string, now: number, ttl: number): NostrEvent {
+export function wrapTags(dropPublicKey: string, now: number, ttl: number | undefined): string[][] {
+  return ttl === undefined ? [['p', dropPublicKey]] : [['p', dropPublicKey], ['expiration', String(now + ttl)]]
+}
+
+function wrapToDrop(seal: NostrEvent, dropPublicKey: string, now: number, ttl: number | undefined): NostrEvent {
   const randomKey = generateSecretKey()
   const ck = nip44.getConversationKey(randomKey, dropPublicKey)
   return finalizeEvent(
@@ -90,10 +101,7 @@ function wrapToDrop(seal: NostrEvent, dropPublicKey: string, now: number, ttl: n
       kind: GIFT_WRAP_KIND,
       content: nip44.encrypt(JSON.stringify(seal), ck),
       created_at: randomPast(now),
-      tags: [
-        ['p', dropPublicKey],
-        ['expiration', String(now + ttl)],
-      ],
+      tags: wrapTags(dropPublicKey, now, ttl),
     },
     randomKey,
   )

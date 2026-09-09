@@ -5,12 +5,14 @@ import { hkdf } from '@noble/hashes/hkdf.js'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { bytesToHex, randomBytes, utf8ToBytes } from '@noble/hashes/utils.js'
 import { deriveDropKeyFromIkm, epochIndexAt, DEFAULT_EPOCH_SECONDS, type DropKey } from './derive.js'
-import { DEFAULT_BUCKET, DEFAULT_TTL_SECONDS, GIFT_WRAP_KIND, PAD_TAG, RumorTooLarge, type DropOptions } from './wrap.js'
+import { DEFAULT_BUCKET, DEFAULT_TTL_SECONDS, GIFT_WRAP_KIND, PAD_TAG, RumorTooLarge, randomPast, wrapTags, type DropOptions } from './wrap.js'
 
 /**
- * Drops for a room: everyone who holds the room key derives the same drop
- * key per epoch, so a room's events can ride kind 1059 with no stable room
- * identifier on any relay. The inner event is already encrypted to the room
+ * Drops for a room: everyone who holds the room key derives every member's
+ * drop key per epoch, so a room's events can ride kind 1059 with no stable
+ * room identifier on any relay. Keys are per member as well as per epoch,
+ * so a relay never sees several senders post to one tag in one hour, which
+ * would give away the room's size. The inner event is already encrypted to the room
  * key by the room's own protocol; this layer only hides that it exists.
  *
  * The ikm keeps the 65-byte shape of the pair derivation with its own case
@@ -29,14 +31,15 @@ export function roomIkm(roomKey: Uint8Array): Uint8Array {
   return ikm
 }
 
-export function deriveRoomDropKey(roomKey: Uint8Array, epochIndex: number): DropKey {
-  return deriveDropKeyFromIkm(roomIkm(roomKey), 'none', epochIndex)
+/** The drop key one member sends on in one epoch. `member` is the member's x-only pubkey as the room knows it. */
+export function deriveRoomDropKey(roomKey: Uint8Array, epochIndex: number, member: string): DropKey {
+  return deriveDropKeyFromIkm(roomIkm(roomKey), 'none', epochIndex, member)
 }
 
-export function deriveRoomDropWindow(roomKey: Uint8Array, unixSeconds: number, epochSeconds = DEFAULT_EPOCH_SECONDS): DropKey[] {
+export function deriveRoomDropWindow(roomKey: Uint8Array, unixSeconds: number, member: string, epochSeconds = DEFAULT_EPOCH_SECONDS): DropKey[] {
   const ikm = roomIkm(roomKey)
   const e = epochIndexAt(unixSeconds, epochSeconds)
-  return [e - 1, e, e + 1].map((i) => deriveDropKeyFromIkm(ikm, 'none', i))
+  return [e - 1, e, e + 1].map((i) => deriveDropKeyFromIkm(ikm, 'none', i, member))
 }
 
 const ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
@@ -45,9 +48,6 @@ function randomAlnum(n: number): string {
   let s = ''
   for (let i = 0; i < n; i++) s += ALPHABET[b[i] % ALPHABET.length]
   return s
-}
-function randomPast(now: number): number {
-  return now - Math.floor(Math.random() * 2 * 24 * 3600)
 }
 
 /**
@@ -80,10 +80,7 @@ export function createRoomDrop(inner: NostrEvent, dropPublicKey: string, opts: D
       kind: GIFT_WRAP_KIND,
       content: nip44.encrypt(roomPlaintext(inner, bucket), ck),
       created_at: randomPast(t),
-      tags: [
-        ['p', dropPublicKey],
-        ['expiration', String(t + ttl)],
-      ],
+      tags: wrapTags(dropPublicKey, t, ttl),
     },
     randomKey,
   )

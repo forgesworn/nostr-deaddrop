@@ -2,6 +2,7 @@ import type { NostrEvent } from 'nostr-tools/pure'
 import type { Filter } from 'nostr-tools/filter'
 import { DEFAULT_EPOCH_SECONDS, deriveDropKeyFromIkm, type DropKey, type PairMaterial, pairIkm, epochIndexAt, type EphemeralCase } from './derive.js'
 import { GIFT_WRAP_KIND } from './wrap.js'
+import { getPublicKey } from 'nostr-tools/pure'
 
 export interface Peer extends Omit<PairMaterial, 'myPrivateKey'> {
   /** Anything the caller wants back on a match (a contact id, a room id). */
@@ -25,11 +26,18 @@ export class DropWatch {
   private readonly peers = new Map<string, { peer: Peer; ikm: Uint8Array; case: EphemeralCase }>()
   private table = new Map<string, Match>()
   private tableEpoch = -1
+  private readonly seen = new Set<string>()
+  private readonly seenOrder: string[] = []
+  private readonly myPublicKey: string
 
+  /** `myPrivateKey` is the holder's rendezvous key (a child of the root), never the identity key. */
   constructor(
     private readonly myPrivateKey: Uint8Array,
     private readonly epochSeconds = DEFAULT_EPOCH_SECONDS,
-  ) {}
+    private readonly rememberSeen = 4096,
+  ) {
+    this.myPublicKey = getPublicKey(myPrivateKey)
+  }
 
   addPeer(peer: Peer): void {
     const { ikm, case: c } = pairIkm({ myPrivateKey: this.myPrivateKey, ...peer })
@@ -48,8 +56,9 @@ export class DropWatch {
     if (e === this.tableEpoch) return
     const next = new Map<string, Match>()
     for (const { peer, ikm, case: c } of this.peers.values()) {
+      // Incoming drops are on the keys the PEER sends on.
       for (const i of [e - 1, e, e + 1]) {
-        const key = deriveDropKeyFromIkm(ikm, c, i)
+        const key = deriveDropKeyFromIkm(ikm, c, i, peer.peerPublicKey)
         next.set(key.publicKey, { peer, key })
       }
     }
@@ -57,11 +66,11 @@ export class DropWatch {
     this.tableEpoch = e
   }
 
-  /** The drop key to send to a peer right now. */
+  /** The drop key to send to a peer right now: this holder's own direction. */
   sendKey(peerPublicKey: string, unixSeconds: number): DropKey {
     const p = this.peers.get(peerPublicKey)
     if (!p) throw new Error('unknown peer')
-    return deriveDropKeyFromIkm(p.ikm, p.case, epochIndexAt(unixSeconds, this.epochSeconds))
+    return deriveDropKeyFromIkm(p.ikm, p.case, epochIndexAt(unixSeconds, this.epochSeconds), this.myPublicKey)
   }
 
   /** Every `p` tag this watch would accept right now. */
@@ -70,13 +79,19 @@ export class DropWatch {
     return [...this.table.keys()]
   }
 
+  /** Match by tag. A wrap already matched once is null the second time: relays replay. */
   match(event: NostrEvent, unixSeconds: number): Match | null {
     if (event.kind !== GIFT_WRAP_KIND) return null
     this.refresh(unixSeconds)
     for (const t of event.tags) {
       if (t[0] === 'p' && t[1]) {
         const m = this.table.get(t[1])
-        if (m) return m
+        if (!m) continue
+        if (this.seen.has(event.id)) return null
+        this.seen.add(event.id)
+        this.seenOrder.push(event.id)
+        if (this.seenOrder.length > this.rememberSeen) this.seen.delete(this.seenOrder.shift()!)
+        return m
       }
     }
     return null

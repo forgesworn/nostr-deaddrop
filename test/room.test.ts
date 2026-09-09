@@ -8,25 +8,29 @@ import { deriveRoomDropKey, deriveRoomDropWindow, createRoomDrop, openRoomDrop, 
 const roomKey = new Uint8Array(32).fill(7)
 const NOW = 1_800_000_000
 const EPOCH = Math.floor(NOW / 3600)
+const A_ID = getPublicKey(generateSecretKey())
+const B_ID = getPublicKey(generateSecretKey())
+const MEMBERS = [A_ID, B_ID]
 
 function chat(text: string, roomId = 'ab'.repeat(32)): NostrEvent {
   return finalizeEvent({ kind: 1460, created_at: NOW, tags: [['d', roomId]], content: text }, generateSecretKey())
 }
 
 describe('room drops', () => {
-  it('everyone with the room key derives the same drop key, and it is not any pair key', () => {
-    const a = deriveRoomDropKey(roomKey, EPOCH)
-    const b = deriveRoomDropKey(new Uint8Array(roomKey), EPOCH)
+  it('everyone with the room key derives every member\'s drop key, one per member per epoch', () => {
+    const a = deriveRoomDropKey(roomKey, EPOCH, A_ID)
+    const b = deriveRoomDropKey(new Uint8Array(roomKey), EPOCH, A_ID)
     expect(a.publicKey).toBe(b.publicKey)
     expect(getPublicKey(a.privateKey)).toBe(a.publicKey)
-    expect(deriveRoomDropKey(roomKey, EPOCH + 1).publicKey).not.toBe(a.publicKey)
-    const pair = deriveDropKey({ myPrivateKey: roomKey, peerPublicKey: getPublicKey(generateSecretKey()) }, EPOCH)
+    expect(deriveRoomDropKey(roomKey, EPOCH + 1, A_ID).publicKey).not.toBe(a.publicKey)
+    expect(deriveRoomDropKey(roomKey, EPOCH, B_ID).publicKey).not.toBe(a.publicKey)
+    const pair = deriveDropKey({ myPrivateKey: roomKey, peerPublicKey: getPublicKey(generateSecretKey()) }, EPOCH, A_ID)
     expect(pair.publicKey).not.toBe(a.publicKey)
-    expect(deriveRoomDropWindow(roomKey, NOW).map((k) => k.epochIndex)).toEqual([EPOCH - 1, EPOCH, EPOCH + 1])
+    expect(deriveRoomDropWindow(roomKey, NOW, A_ID).map((k) => k.epochIndex)).toEqual([EPOCH - 1, EPOCH, EPOCH + 1])
   })
   it('wraps a signed room event and opens it verified, with nothing of the room on the wire', () => {
     const inner = chat('hello room')
-    const key = deriveRoomDropKey(roomKey, EPOCH)
+    const key = deriveRoomDropKey(roomKey, EPOCH, A_ID)
     const drop = createRoomDrop(inner, key.publicKey, { now: () => NOW })
     const wire = JSON.stringify(drop)
     expect(wire.includes(inner.pubkey)).toBe(false)
@@ -36,7 +40,7 @@ describe('room drops', () => {
     expect(() => openRoomDrop(drop, generateSecretKey())).toThrow()
   })
   it('real and filler room drops are the same size', () => {
-    const key = deriveRoomDropKey(roomKey, EPOCH)
+    const key = deriveRoomDropKey(roomKey, EPOCH, A_ID)
     const sizes = new Set<number>()
     for (const t of ['', 'x', 'a longer message than the others by some way']) sizes.add(createRoomDrop(chat(t), key.publicKey, { now: () => NOW }).content.length)
     for (let i = 0; i < 3; i++) sizes.add(createRoomFiller(1460, { now: () => NOW }).content.length)
@@ -68,9 +72,9 @@ describe('QuietTransport', () => {
     let now = NOW
     const relay = new FakeTransport()
     const ticks: (() => void)[] = []
-    const mk = () => new QuietTransport(relay, { roomKey, kinds: [1460], intervalSeconds: 60, now: () => now, schedule: (tick) => { ticks.push(tick); return () => {} } })
-    const alice = mk()
-    const bob = mk()
+    const mk = (member: string) => new QuietTransport(relay, { roomKey, member, members: MEMBERS, kinds: [1460], intervalSeconds: 60, now: () => now, phaseSeconds: 0, schedule: (tick) => { ticks.push(tick); return () => {} } })
+    const alice = mk(A_ID)
+    const bob = mk(B_ID)
     const got: NostrEvent[] = []
     bob.subscribe([{ kinds: [1460], '#d': ['ab'.repeat(32)], since: NOW - 100 }], (e) => got.push(e))
 
@@ -109,9 +113,9 @@ describe('QuietTransport', () => {
     let now = NOW
     const relay = new FakeTransport()
     const key2 = new Uint8Array(32).fill(8)
-    const mk = (k: Uint8Array) => new QuietTransport(relay, { roomKey: k, kinds: [1460], intervalSeconds: 60, now: () => now, schedule: () => () => {} })
-    const alice = mk(roomKey)
-    const removed = mk(roomKey)
+    const mk = (k: Uint8Array, member: string) => new QuietTransport(relay, { roomKey: k, member, members: MEMBERS, kinds: [1460], intervalSeconds: 60, now: () => now, phaseSeconds: 0, schedule: () => () => {} })
+    const alice = mk(roomKey, A_ID)
+    const removed = mk(roomKey, B_ID)
     const got: NostrEvent[] = []
     removed.subscribe([{ kinds: [1460] }], (e) => got.push(e))
     await alice.publish(chat('before'))
@@ -123,15 +127,30 @@ describe('QuietTransport', () => {
     await alice.tick()
     expect(relay.events.length).toBe(2)
     expect(got.length).toBe(1)
-    const stillIn = mk(key2)
+    const stillIn = mk(key2, B_ID)
     const got2: NostrEvent[] = []
     stillIn.subscribe([{ kinds: [1460] }], (e) => got2.push(e))
     expect(got2.map((e) => e.content)).toEqual(['after'])
   })
+  it('a burst is wrapped when its slot comes, one per slot, on the key current then', async () => {
+    let now = NOW
+    const relay = new FakeTransport()
+    const alice = new QuietTransport(relay, { roomKey, member: A_ID, members: MEMBERS, kinds: [1460], intervalSeconds: 60, epochSeconds: 60, now: () => now, phaseSeconds: 0, schedule: () => () => {} })
+    await alice.publish(chat('one'))
+    await alice.publish(chat('two'))
+    expect(alice.pending).toBe(2)
+    await alice.tick()
+    now += 60
+    await alice.tick()
+    expect(relay.events.length).toBe(2)
+    const tags = relay.events.map((e) => e.tags.find((t) => t[0] === 'p')![1])
+    expect(tags[0]).not.toBe(tags[1])   // a new epoch, a new key, so the burst does not stack on one tag
+    expect(alice.pending).toBe(0)
+  })
   it('a transport with the wrong room key sees nothing', async () => {
     const relay = new FakeTransport()
-    const alice = new QuietTransport(relay, { roomKey, kinds: [1460], intervalSeconds: 60, now: () => NOW, schedule: () => () => {} })
-    const other = new QuietTransport(relay, { roomKey: new Uint8Array(32).fill(9), kinds: [1460], intervalSeconds: 60, now: () => NOW, schedule: () => () => {} })
+    const alice = new QuietTransport(relay, { roomKey, member: A_ID, members: MEMBERS, kinds: [1460], intervalSeconds: 60, now: () => NOW, phaseSeconds: 0, schedule: () => () => {} })
+    const other = new QuietTransport(relay, { roomKey: new Uint8Array(32).fill(9), member: B_ID, members: MEMBERS, kinds: [1460], intervalSeconds: 60, now: () => NOW, phaseSeconds: 0, schedule: () => () => {} })
     const got: NostrEvent[] = []
     other.subscribe([{ kinds: [1460] }], (e) => got.push(e))
     await alice.publish(chat('secret'))

@@ -21,6 +21,10 @@ describe('DropWatch', () => {
     expect(m!.peer.ref).toBe('alice')
     const opened = openDrop(wrap, m!.key.privateKey, bob)
     expect(opened.rumor.content).toBe('hello bob')
+    // A relay replays: the same wrap is never matched twice.
+    expect(bobWatch.match(wrap, NOW)).toBeNull()
+    // The reply direction has its own key, so two senders never share a tag.
+    expect(bobWatch.sendKey(getPublicKey(alice), NOW).publicKey).not.toBe(key.publicKey)
 
     expect(bobWatch.match(createFiller({ now: () => NOW }), NOW)).toBeNull()
     const carolWatch = new DropWatch(carol)

@@ -12,16 +12,17 @@ const EB = hexToBytes('8f2b5a94f17bec15e6da441bad23accd776e67d408fdc1683f41e9159
 const EPOCH = 498216
 
 const cases = [
-  { name: 'no-ephemeral', m: { myPrivateKey: A, peerPublicKey: getPublicKey(B) }, epoch: EPOCH },
-  { name: 'both-ephemeral', m: { myPrivateKey: A, peerPublicKey: getPublicKey(B), myEphemeralPrivateKey: EA, peerEphemeralPublicKey: getPublicKey(EB) }, epoch: EPOCH },
-  { name: 'one-ephemeral-A-carries', m: { myPrivateKey: A, peerPublicKey: getPublicKey(B), myEphemeralPrivateKey: EA }, epoch: EPOCH },
-  { name: 'next-epoch-differs', m: { myPrivateKey: A, peerPublicKey: getPublicKey(B) }, epoch: EPOCH + 1 },
+  { name: 'no-ephemeral-A-sends', m: { myPrivateKey: A, peerPublicKey: getPublicKey(B) }, epoch: EPOCH, sender: getPublicKey(A) },
+  { name: 'no-ephemeral-B-sends', m: { myPrivateKey: A, peerPublicKey: getPublicKey(B) }, epoch: EPOCH, sender: getPublicKey(B) },
+  { name: 'both-ephemeral', m: { myPrivateKey: A, peerPublicKey: getPublicKey(B), myEphemeralPrivateKey: EA, peerEphemeralPublicKey: getPublicKey(EB) }, epoch: EPOCH, sender: getPublicKey(A) },
+  { name: 'one-ephemeral-A-carries', m: { myPrivateKey: A, peerPublicKey: getPublicKey(B), myEphemeralPrivateKey: EA }, epoch: EPOCH, sender: getPublicKey(A) },
+  { name: 'next-epoch-differs', m: { myPrivateKey: A, peerPublicKey: getPublicKey(B) }, epoch: EPOCH + 1, sender: getPublicKey(A) },
 ]
 
 const out = {
   format: 'nostr-deaddrop-known-answer-v1',
   saltUtf8: SALT,
-  info: '"drop" || 0x00 || u64be(epoch_index)',
+  info: '"drop" || 0x00 || u64be(epoch_index) || sender_pubkey (32 bytes)',
   ikm: 'case_byte || static_x || eph_x (65 bytes), as forgesworn-link RENDEZVOUS.md §2',
   epochSeconds: DEFAULT_EPOCH_SECONDS,
   testOnlyKeys: {
@@ -30,10 +31,10 @@ const out = {
     ephAPrivHex: bytesToHex(EA), ephAPubXOnly: getPublicKey(EA),
     ephBPrivHex: bytesToHex(EB), ephBPubXOnly: getPublicKey(EB),
   },
-  cases: cases.map(({ name, m, epoch }) => {
+  cases: cases.map(({ name, m, epoch, sender }) => {
     const { ikm, case: c } = pairIkm(m)
-    const k = deriveDropKey(m, epoch)
-    return { name, caseByte: ikm[0], case: c, ikmHex: bytesToHex(ikm), epochIndex: epoch, dropPrivHex: bytesToHex(k.privateKey), dropPubXOnly: k.publicKey }
+    const k = deriveDropKey(m, epoch, sender)
+    return { name, caseByte: ikm[0], case: c, ikmHex: bytesToHex(ikm), epochIndex: epoch, sender, dropPrivHex: bytesToHex(k.privateKey), dropPubXOnly: k.publicKey }
   }),
 }
 writeFileSync(new URL('./deaddrop.json', import.meta.url), JSON.stringify(out, null, 2) + '\n')

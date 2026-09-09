@@ -8,9 +8,9 @@ const pubBob = getPublicKey(bob)
 const pubAlice = getPublicKey(alice)
 const NOW = 1_800_000_000
 
-function drop(content: string) {
-  const key = deriveDropKey({ myPrivateKey: alice, peerPublicKey: pubBob }, 500000)
-  const wrap = createDrop({ content, tags: [['p', pubBob]] }, alice, pubBob, key.publicKey, { now: () => NOW })
+function drop(content: string, ttlSeconds?: number) {
+  const key = deriveDropKey({ myPrivateKey: alice, peerPublicKey: pubBob }, 500000, pubAlice)
+  const wrap = createDrop({ content, tags: [['p', pubBob]] }, alice, pubBob, key.publicKey, { now: () => NOW, ttlSeconds })
   return { key, wrap }
 }
 
@@ -48,11 +48,15 @@ describe('drops', () => {
     expect(() => openDrop(wrap, generateSecretKey(), bob)).toThrow()
     expect(() => openDrop(wrap, key.privateKey, generateSecretKey())).toThrow()
   })
-  it('carries the same expiration whether real or filler', () => {
-    const { wrap } = drop('hi')
-    const filler = createFiller({ now: () => NOW })
-    const exp = (e: typeof wrap) => e.tags.find((t) => t[0] === 'expiration')![1]
-    expect(exp(wrap)).toBe(exp(filler))
+  it('carries no expiration by default, like every other NIP-17 wrap, and the same one when asked', () => {
+    const exp = (e: { tags: string[][] }) => e.tags.find((t) => t[0] === 'expiration')?.[1]
+    expect(exp(drop('hi').wrap)).toBeUndefined()
+    expect(exp(createFiller({ now: () => NOW }))).toBeUndefined()
+    expect(drop('hi').wrap.tags.length).toBe(1)
+    const a = drop('hi', 3600).wrap
+    const filler = createFiller({ now: () => NOW, ttlSeconds: 3600 })
+    expect(exp(a)).toBe(String(NOW + 3600))
+    expect(exp(filler)).toBe(exp(a))
   })
   it('real and filler wraps are the same size', () => {
     const sizes = new Set<number>()
@@ -69,7 +73,7 @@ describe('drops', () => {
     expect(wire.includes(pubAlice)).toBe(false)
   })
   it('uses the default bucket when none is given', () => {
-    const key = deriveDropKey({ myPrivateKey: alice, peerPublicKey: pubBob }, 1)
+    const key = deriveDropKey({ myPrivateKey: alice, peerPublicKey: pubBob }, 1, pubAlice)
     const wrap = createDrop({ content: 'x' }, alice, pubBob, key.publicKey, { now: () => NOW })
     const opened = openDrop(wrap, key.privateKey, bob)
     expect(Buffer.byteLength(JSON.stringify(opened.rumor), 'utf8')).toBe(DEFAULT_BUCKET)

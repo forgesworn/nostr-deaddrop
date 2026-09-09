@@ -90,23 +90,30 @@ export function epochIndexAt(unixSeconds: number, epochSeconds = DEFAULT_EPOCH_S
 }
 
 /**
- * Derive the drop keypair a pair shares for one epoch.
+ * Derive the drop keypair for one epoch and one direction.
  *
- *   scalar = HKDF-SHA256(ikm, salt = "nostr-deaddrop/v1", info = "drop" || 0x00 || u64be(epoch), L = 32) mod n
+ *   scalar = HKDF-SHA256(ikm, salt = "nostr-deaddrop/v1",
+ *                        info = "drop" || 0x00 || u64be(epoch) || sender_pubkey, L = 32) mod n
  *
- * Both ends compute the same key with no ordering rule. The key is a delivery
- * capability: whoever holds it can decrypt the wrap layer and nothing inside it.
+ * `sender` is the x-only public key of whoever sends on this key, so the two
+ * directions of a pair use two keys and a relay never sees two senders post
+ * to one tag in one hour. Both ends compute both keys with no ordering rule.
+ * The key is a delivery capability: whoever holds it can decrypt the wrap
+ * layer and nothing inside it.
  */
-export function deriveDropKey(m: PairMaterial, epochIndex: number): DropKey {
+export function deriveDropKey(m: PairMaterial, epochIndex: number, sender: string): DropKey {
   const { ikm, case: c } = pairIkm(m)
-  return deriveDropKeyFromIkm(ikm, c, epochIndex)
+  return deriveDropKeyFromIkm(ikm, c, epochIndex, sender)
 }
 
-export function deriveDropKeyFromIkm(ikm: Uint8Array, c: EphemeralCase, epochIndex: number): DropKey {
-  const info = new Uint8Array(4 + 1 + 8)
+export function deriveDropKeyFromIkm(ikm: Uint8Array, c: EphemeralCase, epochIndex: number, sender: string): DropKey {
+  const senderBytes = hexToBytes(sender)
+  if (senderBytes.length !== 32) throw new Error('sender must be a 32-byte x-only public key')
+  const info = new Uint8Array(4 + 1 + 8 + 32)
   info.set(utf8ToBytes('drop'), 0)
   info[4] = 0
   info.set(u64be(epochIndex), 5)
+  info.set(senderBytes, 13)
   let okm = hkdf(sha256, ikm, utf8ToBytes(SALT), info, 32)
   let scalar = bytesToBigInt(okm) % N
   // A zero scalar has probability 2^-256; loop rather than special-case it.
@@ -124,9 +131,9 @@ export function deriveDropKeyFromIkm(ikm: Uint8Array, c: EphemeralCase, epochInd
   return { privateKey, publicKey, epochIndex, case: c }
 }
 
-/** Drop keys for the previous, current and next epoch, so clock skew never drops a pair. */
-export function deriveDropWindow(m: PairMaterial, unixSeconds: number, epochSeconds = DEFAULT_EPOCH_SECONDS): DropKey[] {
+/** Drop keys a given sender uses for the previous, current and next epoch, so clock skew never drops a pair. */
+export function deriveDropWindow(m: PairMaterial, unixSeconds: number, sender: string, epochSeconds = DEFAULT_EPOCH_SECONDS): DropKey[] {
   const { ikm, case: c } = pairIkm(m)
   const e = epochIndexAt(unixSeconds, epochSeconds)
-  return [e - 1, e, e + 1].map((i) => deriveDropKeyFromIkm(ikm, c, i))
+  return [e - 1, e, e + 1].map((i) => deriveDropKeyFromIkm(ikm, c, i, sender))
 }

@@ -1,7 +1,7 @@
 {
   "format": "nostr-deaddrop-known-answer-v1",
   "saltUtf8": "nostr-deaddrop/v1",
-  "info": "\"drop\" || 0x00 || u64be(epoch_index)",
+  "info": "\"drop\" || 0x00 || u64be(epoch_index) || sender_pubkey (32 bytes)",
   "ikm": "case_byte || static_x || eph_x (65 bytes), as forgesworn-link RENDEZVOUS.md §2",
   "epochSeconds": 3600,
   "testOnlyKeys": {
@@ -16,13 +16,24 @@
   },
   "cases": [
     {
-      "name": "no-ephemeral",
+      "name": "no-ephemeral-A-sends",
       "caseByte": 0,
       "case": "none",
       "ikmHex": "00c72057e75e1141b61b80f222d78f17a312d1950da578bae510a28c0f537801770000000000000000000000000000000000000000000000000000000000000000",
       "epochIndex": 498216,
-      "dropPrivHex": "c2ea290f4cb5c089c921a7df65684c7ed9b27a2b8fad192138fdad4066964db1",
-      "dropPubXOnly": "8d8c74bb0287d29dbb7c12fb9fd0c3306a583a2274c16b096253c705639619b8"
+      "sender": "3e0b147852ddd35607a06b4bb56ffc102e4d7b3ece162042c3f32f96a49c4613",
+      "dropPrivHex": "8f82aa2b33fd00ac513157ba870b136de91d14df73a0b49a541e554e6a2b8076",
+      "dropPubXOnly": "eba400a04a63e42794c551547a8bd0aa3a2d3a518b449b532e2f885b751162d6"
+    },
+    {
+      "name": "no-ephemeral-B-sends",
+      "caseByte": 0,
+      "case": "none",
+      "ikmHex": "00c72057e75e1141b61b80f222d78f17a312d1950da578bae510a28c0f537801770000000000000000000000000000000000000000000000000000000000000000",
+      "epochIndex": 498216,
+      "sender": "3e27f135286b183bb5dbc6e59a0ccc4a10750302b6ab68ac7495b3c5193012ec",
+      "dropPrivHex": "0444d6b590d75ff85e48d0f5c9ed40a584ccfa07f26d767b4302f7cb8cbb961d",
+      "dropPubXOnly": "ae589c52354d3931f7ccf51f63a1d4bda019e5c2d2a8c08eb29a2d2e5b745d6c"
     },
     {
       "name": "both-ephemeral",
@@ -30,8 +41,9 @@
       "case": "both",
       "ikmHex": "02c72057e75e1141b61b80f222d78f17a312d1950da578bae510a28c0f537801773e0a7579af406dcd49cf4e477abeef28e52c9ac35c68e81c55ff3d6aad359aba",
       "epochIndex": 498216,
-      "dropPrivHex": "657bdf8d23824f322b9afc275258ab3f2851a1940bfa745cea32f24d2f9ff3ef",
-      "dropPubXOnly": "5bb9bc92b1b7ab8512e8c5999eb43a4df115a08597110afde3887a3dd33a4d8a"
+      "sender": "3e0b147852ddd35607a06b4bb56ffc102e4d7b3ece162042c3f32f96a49c4613",
+      "dropPrivHex": "ebd5fe8592cbc7e9f5d6b1b2ed21429c55a83ecd1ec46a5f1117c1fdef9c4e33",
+      "dropPubXOnly": "cc249fe3dd43c2880f3792165d3f18c5fb38fef111ec9be0015838a6b1a0b73b"
     },
     {
       "name": "one-ephemeral-A-carries",
@@ -39,8 +51,9 @@
       "case": "one",
       "ikmHex": "01c72057e75e1141b61b80f222d78f17a312d1950da578bae510a28c0f537801772456c0cdf38cd038890194e740b12b7dff52b59ca56ee2421120d0aa49fb177c",
       "epochIndex": 498216,
-      "dropPrivHex": "4323469e2ddd49fd7fcaa0b1cbe7d79cddac17c50526f4b69336e17db89f26ff",
-      "dropPubXOnly": "da7f6bf2f8a846abbeff35683f42f9dbacb5895af6415ec554c35764d0531f4f"
+      "sender": "3e0b147852ddd35607a06b4bb56ffc102e4d7b3ece162042c3f32f96a49c4613",
+      "dropPrivHex": "1f2d9fd60c9084d3fbaff7bce10fff91dbc8027bf6dd0fe3046e12d8970f750f",
+      "dropPubXOnly": "bef4fa9c84fe40d743f9ef2368ac46fb882fc4e24c3ec26b100bbeb08a1c0598"
     },
     {
       "name": "next-epoch-differs",
@@ -48,8 +61,9 @@
       "case": "none",
       "ikmHex": "00c72057e75e1141b61b80f222d78f17a312d1950da578bae510a28c0f537801770000000000000000000000000000000000000000000000000000000000000000",
       "epochIndex": 498217,
-      "dropPrivHex": "f6a7a75ebe168c53fe47bb389151e06376a694d129a300a105f8674d1c7a0199",
-      "dropPubXOnly": "dd52e3937c7a4e43577541e0e3e4270aad50572f87e2527318fa5528c9978372"
+      "sender": "3e0b147852ddd35607a06b4bb56ffc102e4d7b3ece162042c3f32f96a49c4613",
+      "dropPrivHex": "9f92370c66e6c042ef2e0a0722d5ef9e9eec2125470d9e244254b673c5339e05",
+      "dropPubXOnly": "af9d0ce06e038dbbbed1e726dabacae9996b73b5a60c5d03f50371c9fc242865"
     }
   ]
 }

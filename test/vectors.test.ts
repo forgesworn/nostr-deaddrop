@@ -13,7 +13,7 @@ describe('known-answer vectors', () => {
       if (c.case === 'both') { m.myEphemeralPrivateKey = hexToBytes(k.ephAPrivHex); m.peerEphemeralPublicKey = k.ephBPubXOnly }
       if (c.case === 'one') { m.myEphemeralPrivateKey = hexToBytes(k.ephAPrivHex) }
       expect(bytesToHex(pairIkm(m).ikm)).toBe(c.ikmHex)
-      const d = deriveDropKey(m, c.epochIndex)
+      const d = deriveDropKey(m, c.epochIndex, c.sender)
       expect(bytesToHex(d.privateKey)).toBe(c.dropPrivHex)
       expect(d.publicKey).toBe(c.dropPubXOnly)
     })
