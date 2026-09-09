@@ -9,7 +9,8 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
-    }
+    },
+    "./vectors/deaddrop.json": "./vectors/deaddrop.json"
   },
   "files": [
     "dist",
