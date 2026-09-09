@@ -267,6 +267,21 @@ export class QuietTransport implements Transport {
     return this.queue.length
   }
 
+  /**
+   * Take a queued event back before its slot: the caller's room moved to
+   * a key the event was not written for, or the person withdrew it.
+   * Returns whether it was still queued. A wrap already built for it and
+   * awaiting a retry is discarded with it; the counter that wrap drew
+   * stays marked, which costs this epoch one key and nothing else.
+   */
+  drop(id: string): boolean {
+    const i = this.queue.findIndex((e) => e.id === id)
+    if (i < 0) return false
+    this.queue.splice(i, 1)
+    if (this.current?.inner?.id === id) this.current = undefined
+    return true
+  }
+
   /** Match a wrap, open it, and deliver the inner event to every quiet subscription whose filters it matches. */
   private receive(wrap: NostrEvent, via?: string): void {
     if (!looksLikeWrap(wrap)) return

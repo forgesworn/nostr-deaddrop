@@ -118,3 +118,27 @@ describe('onPosted', () => {
     expect(relay.events.length).toBe(1)
   })
 })
+
+describe('drop', () => {
+  it('takes a queued event back, including one whose wrap was built and refused', async () => {
+    const relay = new Relay()
+    const a = quiet(relay, A_ID, { onError: () => {} })
+    const m1 = chat('one'), m2 = chat('two')
+    await a.publish(m1)
+    await a.publish(m2)
+    expect(a.drop(m2.id)).toBe(true)
+    expect(a.drop(m2.id)).toBe(false)
+    expect(a.pending).toBe(1)
+    relay.failNext = 1
+    await a.tick()               // m1's wrap is built and kept for a retry
+    expect(a.drop(m1.id)).toBe(true)
+    await a.tick()               // the slot is served by a filler, not by m1
+    expect(relay.events.length).toBe(1)
+    const posted = relay.events[0]!
+    const c = quiet(relay, B_ID)
+    const seen: NostrEvent[] = []
+    c.subscribe([{ kinds: [1460] }], (e) => seen.push(e))
+    expect(seen.length).toBe(0)
+    expect(posted.kind).toBe(1059)
+  })
+})

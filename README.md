@@ -118,7 +118,9 @@ and burns no key. Ticks never overlap. An event too big for the bucket is
 refused by `publish` itself, to the caller, so it can never sit at the
 head of the queue. The pending queue is bounded at 256 drops and `publish`
 throws when it is full, which means nothing has been posted in a long
-time and the person should be told. A roster change keeps this member's
+time and the person should be told. `drop(id)` takes a queued event back
+before its slot, for a room that moved to a key the event was not written
+for. A roster change keeps this member's
 used counters; a rekey forgets them, since the keys are new. Two devices
 posting as one member need disjoint `counterRange`s, `[0, 8)` and
 `[8, 16)`, and `exportUsed` and `importUsed` carry counters across a
