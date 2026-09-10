@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.2 (2026-09-10)
+
+### Bug Fixes
+
+- schedule quiet wraps at their slot deadlines (#1)
+
+
+
 ## 0.2.1 (2026-09-09)
 
 ### Bug Fixes
