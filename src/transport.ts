@@ -130,8 +130,32 @@ export class QuietTransport implements Transport {
     this.range = opts.counterRange ?? [0, MAX_PER_EPOCH_ROOM]
     this.table = new KeyTable<string>(this.epochSeconds, Math.ceil(this.lookbackSeconds / this.epochSeconds))
     for (const m of this.members) this.table.set(m, this.sourceFor(m), m)
-    const schedule = opts.schedule ?? ((tick, everyMs) => { const h = setInterval(tick, everyMs); (h as unknown as { unref?: () => void }).unref?.(); return () => clearInterval(h) })
-    this.stopTimer = schedule(() => { this.tick().catch((e) => opts.onError?.(e)) }, Math.max(1000, Math.min(opts.intervalSeconds * 1000, 30_000)))
+    this.stopTimer = opts.schedule
+      ? opts.schedule(() => { this.tick().catch((e) => opts.onError?.(e)) }, 1000)
+      : this.scheduleDeadline()
+  }
+
+  /** Wake at the chosen slot deadline. A fixed polling phase can fall
+   * before every random offset and skip whole slots, including fillers.
+   * Recheck the clock at least every 30 seconds and retry a refused publish
+   * after one second, without overlapping writes or catching up old slots. */
+  private scheduleDeadline(): () => void {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const arm = (first = false): void => {
+      if (this.closed) return
+      const now = this.now()
+      const slot = this.slotIndex(now)
+      const at = slot <= this.lastSlot
+        ? (slot + 1) * this.opts.intervalSeconds
+        : slot * this.opts.intervalSeconds + this.offsetFor(slot)
+      const delay = at > now ? Math.min(30_000, (at - now) * 1000) : first ? 1 : 1000
+      timer = setTimeout(() => {
+        this.tick().catch((e) => this.opts.onError?.(e)).finally(() => arm())
+      }, delay)
+      ;(timer as unknown as { unref?: () => void }).unref?.()
+    }
+    arm(true)
+    return () => { if (timer !== undefined) clearTimeout(timer) }
   }
 
   private sourceFor(m: string) {
