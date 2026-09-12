@@ -36,6 +36,23 @@ const quiet = (relay: Relay, member: string, extra: Partial<ConstructorParameter
   new QuietTransport(relay, { roomKey, member, members: [A_ID, B_ID], kinds: [1460], intervalSeconds: 60, lookbackSeconds: 7200, slotOffset: () => 0, now, schedule: () => () => {}, ...extra })
 
 describe('two devices on one member', () => {
+  it('never draws counters reserved to a delegate, including after the epoch rolls', () => {
+    let now = NOW
+    const epoch = Math.floor(NOW / 3600)
+    const delegated = new Map([[epoch, [0, 1, 2, 3, 4, 5, 6]], [epoch + 1, [0, 1, 2, 3, 4, 5, 7]]])
+    const phone = quiet(new Relay(), A_ID, { counterRange: [0, 8], reservedCounters: at => delegated.get(at) ?? [] }, () => now)
+    expect(phone.sendKey().counter).toBe(7)
+    expect(() => phone.sendKey()).toThrow(EpochExhausted)
+    now += 3600
+    expect(phone.sendKey().counter).toBe(6)
+    expect(() => phone.sendKey()).toThrow(EpochExhausted)
+  })
+
+  it('refuses a malformed reservation instead of silently reusing the range', () => {
+    const phone = quiet(new Relay(), A_ID, { counterRange: [0, 8], reservedCounters: () => [8] })
+    expect(() => phone.sendKey()).toThrow(/reserved counter.*device range/)
+  })
+
   it('a counter seen on the wire is spent for the device that saw it', async () => {
     const relay = new Relay()
     let now = NOW
