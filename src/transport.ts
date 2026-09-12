@@ -2,7 +2,7 @@ import { matchFilters } from 'nostr-tools/filter'
 import type { Filter } from 'nostr-tools/filter'
 import type { NostrEvent } from 'nostr-tools/pure'
 import { getPublicKey, generateSecretKey } from 'nostr-tools/pure'
-import { DEFAULT_EPOCH_SECONDS, DEFAULT_LOOKBACK_SECONDS, MAX_PER_EPOCH_ROOM, type DropKey } from './derive.js'
+import { DEFAULT_EPOCH_SECONDS, DEFAULT_LOOKBACK_SECONDS, MAX_PER_EPOCH_ROOM, epochIndexAt, type DropKey } from './derive.js'
 import { roomIkm, createRoomDrop, createRoomFiller, openRoomDrop } from './room.js'
 import { randomOffset } from './cadence.js'
 import { CREATED_AT_JITTER, GIFT_WRAP_KIND, looksLikeWrap, type DropOptions } from './wrap.js'
@@ -55,6 +55,13 @@ export interface QuietOptions extends DropOptions {
    * ranges, or they will use one tag twice in an hour.
    */
   counterRange?: [number, number]
+  /**
+   * Counters another sender owns in a given epoch. Consulted for every draw,
+   * including after an epoch rollover, so a durable delegate can own future
+   * ranges without this client ever reusing one. Values must lie inside this
+   * device's `counterRange`.
+   */
+  reservedCounters?: (epochIndex: number) => Iterable<number>
   /** Called when a slot's publish fails (the drop stays queued and the same wrap is retried) or a queued event cannot be wrapped (it is dropped). */
   onError?: (error: unknown) => void
   /**
@@ -189,7 +196,10 @@ export class QuietTransport implements Transport {
 
   /** The drop key a send now would use: this member's own, this epoch, a counter unused so far. Throws when the epoch is exhausted. */
   sendKey(): DropKey {
-    return this.table.sendKey(this.member, this.ikm, 'room', this.member, MAX_PER_EPOCH_ROOM, this.now(), this.range)
+    const now = this.now()
+    const epoch = epochIndexAt(now, this.epochSeconds)
+    const reserved = this.opts.reservedCounters?.(epoch) ?? []
+    return this.table.sendKey(this.member, this.ikm, 'room', this.member, MAX_PER_EPOCH_ROOM, now, this.range, reserved)
   }
 
   /** The counters used this epoch, to persist so a restart does not draw one twice. */

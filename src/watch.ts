@@ -154,24 +154,30 @@ export class KeyTable<R = unknown> {
   /**
    * A key to send on now for source `id`, using `ikm` and `sender` as the
    * sender side derives them: a random counter in `range` (all of `[0, max)`
-   * by default) never used in this epoch by this process. Throws
+   * by default) never used in this epoch by this process and not reserved by
+   * its caller. Throws
    * EpochExhausted when all are used; the caller waits for the next epoch.
    */
-  sendKey(id: string, ikm: Uint8Array, c: EphemeralCase, sender: string, max: number, unixSeconds: number, range: [number, number] = [0, max]): DropKey {
+  sendKey(id: string, ikm: Uint8Array, c: EphemeralCase, sender: string, max: number, unixSeconds: number, range: [number, number] = [0, max], reserved: Iterable<number> = []): DropKey {
     const e = epochIndexAt(unixSeconds, this.epochSeconds)
     const [lo, hi] = range
     if (!Number.isInteger(lo) || !Number.isInteger(hi) || lo < 0 || hi > max || hi <= lo) throw new Error('counter range must lie inside [0, max)')
+    const unavailable = new Set<number>()
+    for (const counter of reserved) {
+      if (!Number.isInteger(counter) || counter < lo || counter >= hi) throw new Error('reserved counter must lie inside the device range')
+      unavailable.add(counter)
+    }
     const ikmHex = bytesToHex(ikm)
     let u = this.used.get(id)
     if (!u || u.epoch !== e || u.ikmHex !== ikmHex) { u = { ikmHex, epoch: e, counters: new Set() }; this.used.set(id, u) }
     let free = 0
-    for (let k = lo; k < hi; k++) if (!u.counters.has(k)) free += 1
+    for (let k = lo; k < hi; k++) if (!u.counters.has(k) && !unavailable.has(k)) free += 1
     if (free === 0) throw new EpochExhausted(e, hi - lo)
     // Unbiased 16-bit draw over the range, rejecting the top slice.
     const span = hi - lo
     const limit = 65536 - (65536 % span)
     let counter: number | undefined
-    while (counter === undefined || u.counters.has(counter)) {
+    while (counter === undefined || u.counters.has(counter) || unavailable.has(counter)) {
       const b = randomBytes(2)
       const r = (b[0]! << 8) | b[1]!
       if (r >= limit) continue
