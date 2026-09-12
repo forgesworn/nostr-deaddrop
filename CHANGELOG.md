@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.0 (2026-09-12)
+
+### Features
+
+- reserve quiet room counters
+
+
+
 ## 0.2.2 (2026-09-10)
 
 ### Bug Fixes

@@ -1,6 +1,6 @@
 {
   "name": "nostr-deaddrop",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "description": "Dead drops on Nostr: gift wraps addressed to a per-epoch rendezvous key instead of the recipient, sent on a cadence, received by broadcast. A watcher cannot tell whether a message was sent, to whom, or when.",
   "type": "module",
   "main": "./dist/index.js",
