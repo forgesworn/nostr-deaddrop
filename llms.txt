@@ -1,0 +1,85 @@
+# nostr-deaddrop
+
+> A NIP-59 gift wrap still names its recipient in the `p` tag, so a relay
+> knows who a message is for even though it cannot read it. nostr-deaddrop
+> replaces that tag with a per-epoch rendezvous key derived from a shared
+> secret, so neither party's identity appears on the event.
+
+Both sides derive the same sequence of one-time keys per hour, per
+direction, per message. A sender sends one wrap per interval whether or
+not it has anything to say, so real drops and fillers are indistinguishable
+in size, tags and timing. A receiver pulls every recent gift wrap by
+broadcast and matches tags against a local key table, so nothing is
+requested by identity. Byte-for-byte NIP-59: no new kinds or tags a relay
+has to know about.
+
+This is one layer. It hides who a wrap is for; it does not hide that you
+posted one, or when, over the wire. See the README's "What the layers
+around it must do" for the carrier, key and bucket-size requirements this
+library does not cover.
+
+## Getting Started
+
+```bash
+npm install nostr-deaddrop
+```
+
+```ts
+import { DropWatch, Cadence, createDropSeal, openDrop, stripPadding, broadcastFilter } from 'nostr-deaddrop'
+
+const watch = new DropWatch(myPrivateKey)
+watch.addPeer({ peerPublicKey: friendPub, ref: 'friend' })
+
+const seal = createDropSeal({ kind: 14, content: 'see you at eight', tags: [['p', friendPub]] }, myPrivateKey, friendPub)
+const cadence = new Cadence({ intervalSeconds: 3600 })
+cadence.enqueue(seal, () => watch.sendKey(friendPub, now()).publicKey)
+setInterval(() => { const w = cadence.due(now()); if (w) publish(w) }, 30_000)
+
+for await (const ev of subscribe(broadcastFilter(lastPull))) {
+  const m = watch.match(ev, now())
+  if (!m) continue
+  let opened
+  try { opened = openDrop(ev, m.key.privateKey, myPrivateKey) } catch { continue }
+  if (!watch.remember(opened.rumor.id)) continue
+  show(stripPadding(opened.rumor), m.peer.ref)
+}
+```
+
+## Key Concepts
+
+- **Rendezvous key**: a child of your root key (nsec-tree purpose
+  `rendezvous`), not your identity key. Its public half goes on a contact
+  card; both devices holding the private half can derive the same drop keys.
+- **Epoch**: a one-hour window. Both sides derive up to 64 drop keys per
+  pair (16 per room member) for the current epoch from a shared secret,
+  with no ordering rule needed between sender and receiver.
+- **Cadence**: posts exactly one wrap per interval, real or filler, at a
+  random moment inside it, so posting times carry no linkable phase.
+- **Broadcast receive**: pull every recent kind 1059 and match tags
+  locally, rather than requesting by identity.
+- **Rooms**: members share a room key and derive each other's drop keys
+  under a separate case byte, so no pairwise secrets are needed.
+
+## API Surface
+
+- `DropWatch`, `KeyTable`, `EpochExhausted`, `broadcastFilter`,
+  `taggedFilter`, `taggedFilters` -- deriving and matching drop keys, and
+  building relay filters for broadcast or tagged pulls.
+- `Cadence`, `randomOffset` -- queuing seals and releasing one wrap per
+  interval at a jittered moment.
+- `createDropSeal`, `wrapSeal`, `createDrop`, `createFiller`, `openDrop`,
+  `looksLikeWrap`, `stripPadding`, `padToBucket` -- sealing, wrapping,
+  opening and padding individual drops.
+- `deriveDropKey`, `deriveDropKeyFromIkm`, `deriveDropEpoch`,
+  `deriveDropWindow`, `epochIndexAt`, `ecdhX`, `pairIkm`, `pairIkmCases`
+  -- the key derivation primitives behind `DropWatch` and `Cadence`.
+- `deriveRoomDropKey`, `deriveRoomDropWindow`, `createRoomDrop`,
+  `openRoomDrop`, `createRoomFiller`, `roomIkm` -- the room equivalents.
+- `QuietTransport`, `roomFiller` -- wraps an existing relay transport so
+  chosen event kinds ride on the cadence and come back by broadcast.
+
+## Optional
+
+- Full walkthrough, security notes and layer-by-layer threat model: README.md
+- Known-answer vectors: vectors/deaddrop.json
+- Changelog: CHANGELOG.md
