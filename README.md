@@ -19,6 +19,10 @@ Byte-for-byte NIP-59. No new kinds, no new tags a relay has to know about, nothi
 
 ## Use
 
+```bash
+npm install nostr-deaddrop
+```
+
 ```ts
 import { DropWatch, Cadence, createDropSeal, openDrop, stripPadding, broadcastFilter } from 'nostr-deaddrop'
 
