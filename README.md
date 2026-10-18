@@ -23,8 +23,24 @@ Byte-for-byte NIP-59. No new kinds, no new tags a relay has to know about, nothi
 npm install nostr-deaddrop
 ```
 
+ESM only: the package has no `require` condition, so `require('nostr-deaddrop')` fails with `ERR_PACKAGE_PATH_NOT_EXPORTED`. Use `import`, or `await import('nostr-deaddrop')` from CommonJS. Node 22 or later (`engines`; CI runs 22 and 24).
+
+Conventions used throughout: every time is **unix seconds**, never milliseconds (`now`, `lastPull`, `since`, `unixSeconds` arguments). A private key is a 32-byte `Uint8Array`. A public key is lower-case 64-character x-only hex, the form `getPublicKey` from `nostr-tools/pure` returns. `myPrivateKey` is your rendezvous private key and `friendPub` your friend's rendezvous public key; see "Which key to use" for deriving both.
+
 ```ts
 import { DropWatch, Cadence, createDropSeal, openDrop, stripPadding, broadcastFilter } from 'nostr-deaddrop'
+import type { NostrEvent } from 'nostr-tools/pure'
+import type { Filter } from 'nostr-tools/filter'
+
+// Supplied by your app and your carrier, declared here so the example is complete.
+declare const myPrivateKey: Uint8Array // your rendezvous private key
+declare const friendPub: string        // their rendezvous public key, hex
+declare let lastPull: number           // unix seconds when your last pull began; persist it
+declare function publish(event: NostrEvent): Promise<void> // post one event over your carrier
+declare function pull(filter: Filter): Promise<NostrEvent[]> // one REQ over your carrier, resolves at EOSE
+declare function show(rumor: { kind: number; content: string; tags: string[][] }, ref: unknown): void
+
+const now = () => Math.floor(Date.now() / 1000)
 
 // Both sides hold the other's public key from a contact card or a bond.
 const watch = new DropWatch(myPrivateKey)
@@ -34,24 +50,50 @@ watch.addPeer({ peerPublicKey: friendPub, ref: 'friend' })
 const seal = createDropSeal({ kind: 14, content: 'see you at eight', tags: [['p', friendPub]] }, myPrivateKey, friendPub)
 const cadence = new Cadence({ intervalSeconds: 3600 })
 cadence.enqueue(seal, () => watch.sendKey(friendPub, now()).publicKey)
-setInterval(() => { const w = cadence.due(now()); if (w) publish(w) }, 30_000)
+let outbox: NostrEvent | null = null
+setInterval(async () => {
+  outbox ??= cadence.due(now())
+  if (!outbox) return
+  try { await publish(outbox); outbox = null } catch { /* keep it: post the same wrap next tick */ }
+}, 30_000)
 
-// Receive: every wrap since last time, from anyone, over your carrier. The filter
-// reaches two days further back than `lastPull` for the created_at jitter; page it.
-for await (const ev of subscribe(broadcastFilter(lastPull))) {
+// Receive: every wrap since last time, from anyone, over your carrier. `broadcastFilter`
+// reaches two days further back than `since` for the created_at jitter. Relays serve a
+// page at a time, so walk `until` back to the oldest wrap seen and stop when a page adds
+// nothing new. `until` is inclusive: the boundary second comes back once more and `seen`
+// drops the repeats.
+async function pullAll(since: number): Promise<NostrEvent[]> {
+  const out: NostrEvent[] = []
+  const seen = new Set<string>()
+  let until = now()
+  for (let page = 0; page < 1000; page++) {
+    const events = await pull({ ...broadcastFilter(since, 500), until })
+    const fresh = events.filter((ev) => !seen.has(ev.id))
+    if (fresh.length === 0) break
+    for (const ev of fresh) { seen.add(ev.id); out.push(ev) }
+    until = Math.min(...fresh.map((ev) => ev.created_at))
+  }
+  return out
+}
+
+const pullStarted = now()
+for (const ev of await pullAll(lastPull)) {
   const m = watch.match(ev, now())
   if (!m) continue
   let opened
   try { opened = openDrop(ev, m.key.privateKey, myPrivateKey) } catch { continue }
-  if (!watch.remember(opened.rumor.id)) continue     // a replay, or an old seal re-wrapped
+  if (!watch.remember(opened.rumor.id, ev.id)) continue // a replay, or an old seal re-wrapped
   show(stripPadding(opened.rumor), m.peer.ref)
 }
+lastPull = pullStarted
 ```
 
 The table behind `match` holds every key every peer may use from two days
 back to an hour ahead: 64 keys an hour per peer, about a second per peer
 to derive on a laptop and roughly 1.3 KB per key in memory, built once and
-then one epoch at a time. Pass `lookbackEpochs` to shorten it. A sender
+then one epoch at a time. Pass `lookbackEpochs` (a `DropWatchOptions` field, a
+whole number of epochs, 48 by default, so two days) to shorten it:
+`new DropWatch(myPrivateKey, { lookbackEpochs: 24 })`. A sender
 that has used all 64 keys in an hour throws `EpochExhausted`; the cadence
 then posts a filler and the drop waits for the next hour.
 
@@ -60,18 +102,41 @@ A restart forgets them, and two devices holding one rendezvous key draw
 independently, so either can repeat a tag in the hour it happened, and a
 repeated tag is the one thing that marks two wraps as real and related.
 Two rules keep the promise: give each device its own `counterRange` (the
-phone `[0, 32)`, the laptop `[32, 64)`), and persist `exportUsed()` and
-restore it with `importUsed()` across a restart. A client that does
-neither has this hour's tags at risk, and nothing older or newer.
+phone `[0, 32)`, the laptop `[32, 64)`; a `DropWatchOptions` field, see the
+reference below), and persist `exportUsed()` and restore it with
+`importUsed()` across a restart. Restore within the hour it was saved:
+entries for another epoch are ignored, which is fine, since only this
+hour's tags are at risk. A client that does neither has this hour's tags at
+risk, and nothing older or newer.
 
 ## Which key to use
 
 Pass a **rendezvous key**, not your identity key. A rendezvous key is a
-child of your root (nsec-tree purpose `rendezvous`) whose public half you
-hand to contacts on a card and whose private half your devices hold. Your
-identity secret stays in its signer and never computes a shared secret with
-anyone; losing a device rotates the rendezvous key and touches nothing
+child of your root, derived with [nsec-tree](https://github.com/forgesworn/nsec-tree)
+under purpose `rendezvous`, whose public half you hand to contacts on a
+card and whose private half your devices hold. Your identity secret stays
+in its signer and never computes a shared secret with anyone; losing a
+device rotates the rendezvous key (bump the index) and touches nothing
 else. Every `myPrivateKey` and `peerPublicKey` below means that key.
+
+```ts
+import { fromNsec, derive } from 'nsec-tree/core' // npm install nsec-tree
+import { getPublicKey } from 'nostr-tools/pure'
+
+declare const identityNsec: string // or fromMnemonic from 'nsec-tree', for a mnemonic
+
+// Run this where the root lives (the signer); hand devices only the child.
+const root = fromNsec(identityNsec)
+const rendezvous = derive(root, 'rendezvous', 0) // bump the index to rotate
+root.destroy()
+
+const myPrivateKey: Uint8Array = rendezvous.privateKey // pass this to DropWatch
+const myRendezvousPub: string = getPublicKey(myPrivateKey) // hex, for your contact card
+```
+
+`rendezvous.publicKey` is a `Uint8Array`, not hex; use `getPublicKey` as
+above, or `bytesToHex` from `@noble/hashes/utils.js`. The same applies to the
+contact's key: `addPeer` and `sendKey` take their hex.
 
 ## Derivation
 
@@ -105,13 +170,38 @@ ikm  = 0x10 || HKDF-SHA256(roomKey, salt = "nostr-deaddrop/room/v1", info = "ikm
 seal and no re-signing; `openRoomDrop` gives it back verified. The relay
 sees no `d` tag, no kind and no author.
 
-`QuietTransport` does the whole thing for a room: wrap any transport with
-`publish`, `subscribe` and `close`, name the kinds that should go quiet, and
+`QuietTransport` does the whole thing for a room: wrap any `Transport`
+(the interface below), name the kinds that should go quiet, and
 those kinds ride inside drops on a cadence and come back by broadcast
 through the caller's original filters. Other kinds pass straight through,
 which is where live signalling belongs, because a slot of delay ends a call.
 
+The interface it wraps, exported as the type `Transport`:
+
 ```ts
+import type { NostrEvent } from 'nostr-tools/pure'
+import type { Filter } from 'nostr-tools/filter'
+
+interface Transport {
+  publish(event: NostrEvent): Promise<void>
+  subscribe(filters: Filter[], onEvent: (event: NostrEvent, via?: string) => void, onEose?: () => void): () => void // returns an unsubscribe function
+  close(): void
+  describe?(): { url: string; read: boolean; write: boolean }[]
+}
+```
+
+`via` is the relay that delivered an event, when known; `describe` is
+optional and passed through.
+
+```ts
+import { QuietTransport, type Transport } from 'nostr-deaddrop'
+
+declare const relayPool: Transport // your relay client, already on your carrier
+declare const roomKey: Uint8Array  // the room's current epoch key, 32 bytes
+declare const me: string           // this member's x-only pubkey, hex
+declare const roster: string[]     // every member's x-only pubkey, hex
+declare const nextRoomKey: Uint8Array
+
 const quiet = new QuietTransport(relayPool, { roomKey, member: me, members: roster, kinds: [1460], intervalSeconds: 3600 })
 // hand `quiet` to the room session exactly where the relay pool went
 quiet.rekey(nextRoomKey)   // whenever the room rotates its key
@@ -159,6 +249,89 @@ drops, and nothing after; deriving drops from a key that never rotates
 would let them read forever. Anything still queued at a rekey goes out on
 the new key: a member removed at the rekey does not receive it.
 
+## Reference for the options and methods above
+
+All times are unix seconds. Keys are `Uint8Array` (private) or lower-case
+64-character hex (public). Full per-export signatures are in `llms-full.txt`.
+
+```ts
+// Options for new DropWatch(myPrivateKey: Uint8Array, opts?: DropWatchOptions)
+interface DropWatchOptions {
+  epochSeconds?: number            // default 3600
+  lookbackEpochs?: number          // whole epochs of keys kept behind now, integer >= 1, default 48 (two days)
+  rememberSeen?: number            // how many delivered rumor ids and opened wrap ids to remember, default 4096
+  counterRange?: [number, number]  // [lo, hi) inside [0, 64) this device draws from, default [0, 64)
+}
+
+interface Peer {                   // what addPeer takes
+  peerPublicKey: string            // required, their rendezvous public key, hex
+  myEphemeralPrivateKey?: Uint8Array
+  peerEphemeralPublicKey?: string
+  ref?: unknown                    // anything you want back on a match
+}
+
+interface DropKey {
+  privateKey: Uint8Array           // the key that opens the wrap layer
+  publicKey: string                // the `p` tag
+  epochIndex: number
+  counter: number                  // which of the epoch's keys this is
+  case: 'none' | 'one' | 'both' | 'room'
+}
+
+interface Match {                  // what match returns, or null
+  peer: Peer                       // the object you gave addPeer, so peer.ref is yours
+  key: DropKey                     // pass key.privateKey to openDrop
+  alternate: boolean               // the peer sent on another card case: someone's card is out of step
+}
+
+interface UsedCounters { epoch: number; counters: number[] }
+```
+
+`DropWatch` methods:
+
+- `addPeer(peer: Peer): void` throws unless `peerPublicKey` is lower-case 64-hex. Adding a peer again replaces it and keeps its used counters while the key material is unchanged.
+- `removePeer(peerPublicKey: string): void`
+- `sendKey(peerPublicKey: string, unixSeconds: number): DropKey` is the key to send on now: this side's direction, a counter unused this epoch and inside `counterRange`. Throws `Error('unknown peer')` before `addPeer`, and `EpochExhausted` when every counter in the range is used.
+- `match(event: NostrEvent, unixSeconds: number): Match | null` is a set lookup on the wrap's `p` tag. It remembers nothing.
+- `remember(rumorId: string, wrapId?: string): boolean` returns `false` if that rumor was already delivered. With `wrapId`, a later replay of the same wrap is skipped by `match` without a decryption.
+- `exportUsed(): Record<string, UsedCounters>`, keyed by peer public key; `importUsed(state: Record<string, UsedCounters>, unixSeconds: number): void`. Entries for another epoch or other key material are ignored.
+- `refresh(unixSeconds: number): void`, `tags(unixSeconds: number): string[]`, and `size`, the number of keys held.
+
+`QuietTransport` is `new QuietTransport(inner: Transport, opts: QuietOptions)`.
+`QuietOptions` extends `DropOptions` (`bucket`, `ttlSeconds`, `now`).
+
+```ts
+import type { NostrEvent } from 'nostr-tools/pure'
+import type { DropOptions } from 'nostr-deaddrop' // bucket?, ttlSeconds?, now?
+
+interface QuietOptions extends DropOptions {
+  roomKey: Uint8Array              // required: the room's current epoch key
+  member: string                   // required: this member's pubkey, hex
+  members: string[]                // required: every member's pubkey, hex
+  kinds: number[]                  // required: event kinds that ride inside drops
+  intervalSeconds: number          // required: seconds between slots
+  epochSeconds?: number            // default 3600
+  lookbackSeconds?: number         // seconds, not epochs: how far back to pull and derive, default two days
+  pageSize?: number                // backfill page size (the filter limit), default 500
+  maxPages?: number                // most pages the backfill walks, default 1000
+  counterRange?: [number, number]  // [lo, hi) inside [0, 16), default [0, 16)
+  reservedCounters?: (epochIndex: number) => Iterable<number> // counters another sender owns, inside counterRange
+  onError?: (error: unknown) => void // a publish was refused (it is retried) or a queued event could not be wrapped (it is dropped)
+  onPosted?: (posted: { slot: number; wrap: NostrEvent; inner?: NostrEvent }) => void // relay took the slot's wrap; inner is absent for a filler
+  slotOffset?: (slot: number) => number // tests pass () => 0
+  schedule?: (tick: () => void, everyMs: number) => () => void // tests
+}
+```
+
+`QuietTransport` methods: `publish`, `subscribe`, `close` and `describe` as
+`Transport`; `rekey(roomKey: Uint8Array): void`; `setMembers(members: string[]): void`;
+`drop(id: string): boolean`, which takes a queued event back before its slot
+by event id and returns whether it was still queued (a method, not an
+option); `sendKey(): DropKey`; `exportUsed(): Record<string, UsedCounters>`,
+keyed by member; `importUsed(state: Record<string, UsedCounters>): void`
+(no clock argument, unlike `DropWatch.importUsed`, because it uses its own);
+`tick(): Promise<void>`; and `pending`, the queue length. `QuietTransport.MAX_PENDING` is 256.
+
 ## What the relays actually do
 
 Measured 2026-09-09 over one day, unauthenticated REQ for kind 1059:
@@ -200,7 +373,17 @@ each has a known answer:
   Then a stolen key costs one index of one pair's pattern, and nothing
   older or newer.
 - **The bucket.** One size per conversation, chosen once, never changed.
-  The defaults (512 bytes for a pair, 768 for a room) come from a day of
+  The option is `bucket` (`DropOptions`, so `createDropSeal`, `createDrop`,
+  `createFiller`, `Cadence`, `QuietTransport`, `createRoomDrop` and
+  `createRoomFiller` all take it). It counts bytes, not characters, and it
+  counts the whole rumor, not your message: for a pair, the UTF-8 length of
+  the serialised rumor JSON (`id`, `pubkey`, `created_at`, `kind`, all
+  tags including the `pad` tag, and `content`), padded to exactly `bucket`;
+  for a room, the UTF-8 length of the `{ "e": <signed inner event>, "pad": ... }`
+  plaintext. The fixed fields and a `pad` tag take about 215 bytes of a
+  pair bucket before any content, so 512 leaves roughly 290 bytes for
+  your tags and message. The defaults (`DEFAULT_BUCKET` 512 for a pair,
+  `DEFAULT_ROOM_BUCKET` 768 for a room) come from a day of
   real wraps on two public relays: median content 556 characters, 90th
   percentile 2140. A pair drop at the default is 1796 characters, a room
   drop 1116. A bigger bucket stands out; do not raise it without a reason.
@@ -219,7 +402,7 @@ cannot tell whether you spoke, to whom, or when.
 
 - The drop private key is a delivery capability: whoever holds it can open the wrap layer and see a seal they cannot open. The seal carries the sender's public key and signature, so a stolen drop key attributes that one wrap to its sender with proof; it opens nothing inside, and no other wrap.
 - `match` remembers nothing, because a relay that has seen a tag could otherwise burn it with junk carrying the same id. Open the wrap, then `remember(rumor.id)`; anything already remembered is a replay or an old seal re-wrapped by a key holder, and must not be shown twice.
-- Padding is a `pad` tag inside the rumor. Strip it before showing a message. Content larger than the bucket throws; pick a bigger bucket for the whole conversation, not per message. `padToBucket` needs `created_at`, because its width is part of the size.
+- Padding is a `pad` tag inside the rumor. Strip it before showing a message. A rumor whose serialisation is larger than the bucket throws `RumorTooLarge` (it carries `length` and `bucket`); pick a bigger bucket for the whole conversation, not per message. `padToBucket` needs `created_at`, because its width is part of the size.
 - Filler wraps are real gift wraps to random keys. They cost a relay a few kilobytes an hour per sender.
 - `Cadence.due` hands the caller one wrap per slot and forgets it; if the relay refuses it, post that same wrap again rather than asking for another. A slot that passed while the caller slept is skipped, not caught up, so the rate never bursts.
 - The rumor's id is checked against its hash on open, so the id an app deduplicates on cannot be chosen by the sender.

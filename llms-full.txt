@@ -1,0 +1,269 @@
+# nostr-deaddrop: full reference
+
+Complete per-export reference for nostr-deaddrop 0.3.x, matching `src/index.ts`.
+Overview and the worked example: llms.txt. Protocol walkthrough, security notes
+and threat model: README.md.
+
+ESM only (no `require` condition), Node 22 or later. Times are unix seconds.
+Private keys are 32-byte `Uint8Array`; public keys are lower-case 64-char x-only
+hex. `NostrEvent` and `UnsignedEvent` are from `nostr-tools/pure`; `Filter` is
+from `nostr-tools/filter`.
+
+## Functions and classes
+
+```ts
+// Derivation (src/derive.ts, src/room.ts)
+epochIndexAt(unixSeconds: number, epochSeconds = 3600): number          // floor(unixSeconds / epochSeconds); throws on a bad clock
+ecdhX(privateKey: Uint8Array, peerPublicKeyXOnly: string): Uint8Array   // 32-byte x-coordinate of the ECDH point
+pairIkm(m: PairMaterial): { ikm: Uint8Array; case: EphemeralCase }      // 65-byte `case_byte || static_x || eph_x`, byte-identical to forgesworn-link's rendezvous ikm
+pairIkmCases(m: PairMaterial): { ikm: Uint8Array; case: EphemeralCase }[] // every ikm the pair could be on while cards change hands, deduplicated; [0] is the one this side sends on
+deriveDropKey(m: PairMaterial, epochIndex: number, sender: string, counter = 0): DropKey
+deriveDropKeyFromIkm(ikm: Uint8Array, c: EphemeralCase, epochIndex: number, sender: string, counter = 0): DropKey // ikm must be 65 bytes, counter 0..65535, sender x-only hex
+deriveDropEpoch(ikm: Uint8Array, c: EphemeralCase, epochIndex: number, sender: string, max: number): DropKey[]   // counters 0..max-1 for one epoch
+deriveDropWindow(m: PairMaterial, unixSeconds: number, sender: string, epochSeconds = 3600, max = 64): DropKey[] // previous, current and next epoch
+roomIkm(roomKey: Uint8Array): Uint8Array                                 // roomKey is 32 bytes; ikm is `0x10 || HKDF(roomKey) || 32 zero bytes`
+deriveRoomDropKey(roomKey: Uint8Array, epochIndex: number, member: string, counter = 0): DropKey
+deriveRoomDropWindow(roomKey: Uint8Array, unixSeconds: number, member: string, epochSeconds = 3600, max = 16): DropKey[]
+
+// Wrapping, opening, padding (src/wrap.ts, src/room.ts)
+padToBucket(event: Partial<UnsignedEvent>, bucket = 512): Partial<UnsignedEvent> // adds a `pad` tag so the rumor serialises to exactly `bucket` bytes; created_at required; throws RumorTooLarge
+createDropSeal(event: Partial<UnsignedEvent>, senderPrivateKey: Uint8Array, recipientPublicKey: string, opts?: DropOptions): NostrEvent // pads to the bucket, makes the rumor, returns the kind 13 seal; queue this on a Cadence
+wrapSeal(seal: NostrEvent, dropPublicKey: string, opts?: DropOptions): NostrEvent // the outer kind 1059 layer: throwaway signer, `p` tag = dropPublicKey, jittered created_at
+createDrop(event: Partial<UnsignedEvent>, senderPrivateKey: Uint8Array, recipientPublicKey: string, dropPublicKey: string, opts?: DropOptions): NostrEvent // createDropSeal then wrapSeal in one go, for use without a Cadence
+createFiller(opts?: DropOptions): NostrEvent                             // a drop to throwaway keys with empty content, same size as a real one; nobody can open it
+openDrop(wrap: NostrEvent, dropPrivateKey: Uint8Array, recipientPrivateKey: Uint8Array): Opened // { rumor, seal }; throws if not a wrap, bad seal, or the rumor id is not its hash
+looksLikeWrap(e: unknown): e is NostrEvent                               // type guard: kind 1059, string content, hex pubkey, string-array tags; relays send anything
+stripPadding<T extends { tags: string[][] }>(rumor: T): T                // remove the `pad` tag before showing a rumor
+createRoomDrop(inner: NostrEvent, dropPublicKey: string, opts?: DropOptions): NostrEvent // wrap an already-signed room event, no seal; bucket defaults to 768
+openRoomDrop(wrap: NostrEvent, dropPrivateKey: Uint8Array): NostrEvent   // the inner event, signature verified
+createRoomFiller(innerKind: number, opts?: DropOptions): NostrEvent      // a room-sized filler whose inner event has kind innerKind
+
+// Watching and filters (src/watch.ts)
+new DropWatch(myPrivateKey: Uint8Array, opts?: DropWatchOptions)         // pairs; methods and options: llms-full.txt
+broadcastFilter(since: number, limit?: number): Filter                   // { kinds: [1059], since: since - 2 days, limit? }
+taggedFilter(tags: string[], since: number): Filter                      // one filter asking for all `tags` at once ({ '#p': tags }); weaker, leaks the peer count to the relay
+taggedFilters(tags: string[], since: number): Filter[]                   // one filter per tag, for one request per tag over separate circuits; prefer this over taggedFilter
+class EpochExhausted extends Error { epochIndex: number; max: number }   // thrown by sendKey when every counter in range is used; wait for the next epoch
+new KeyTable<R>(epochSeconds = 3600, lookbackEpochs = 48)                // the lookup table inside DropWatch and QuietTransport: tag -> Hit<R>
+
+// Scheduling (src/cadence.ts)
+new Cadence(opts: CadenceOptions)                                        // opts: DropOptions plus intervalSeconds, slotOffset?, onError?
+cadence.enqueue(seal: NostrEvent, dropPublicKey: () => string): void     // the callback runs when the slot comes; throws when 256 are queued
+cadence.due(unixSeconds: number): NostrEvent | null                      // at most one wrap per slot, a filler if nothing is queued; post it, retry the same wrap on failure
+randomOffset(intervalSeconds: number): number                            // CSPRNG integer in [0, intervalSeconds): where inside a slot to post
+
+// Rooms over a relay transport (src/transport.ts)
+new QuietTransport(inner: Transport, opts: QuietOptions)                 // methods and options: llms-full.txt
+roomFiller(kind: number, opts?: DropOptions): NostrEvent                 // identical to createRoomFiller(kind, opts): a one-line alias exposed from the transport module
+```
+
+`roomFiller(kind, opts)` only calls `createRoomFiller(kind, opts)`: same
+parameters, same result, no behavioural difference. `createRoomFiller` lives in
+the room module; `roomFiller` is an alias exported from the transport module for
+tests and for callers that pace their own stream. Use either.
+
+`taggedFilter` and `taggedFilters` both build `kind 1059` filters with a `#p`
+list; the singular returns one filter for many tags, the plural one filter per
+tag. Both reach two days back before `since`, like `broadcastFilter`.
+
+`opts.bucket` (in `DropOptions`, so on every create function, `Cadence` and
+`QuietTransport`) is bytes: the UTF-8 length of the whole padded rumor JSON for
+a pair (512 by default), of the `{ e: inner, pad }` plaintext for a room (768).
+
+## Constants
+
+```ts
+SALT = 'nostr-deaddrop/v1'          // HKDF salt for pair and room drop keys
+DEFAULT_EPOCH_SECONDS = 3600
+DEFAULT_LOOKBACK_SECONDS = 172800   // two days
+MAX_PER_EPOCH_PAIR = 64             // keys per sender per epoch on a pair
+MAX_PER_EPOCH_ROOM = 16             // keys per member per epoch in a room
+GIFT_WRAP_KIND = 1059
+PAD_TAG = 'pad'
+DEFAULT_BUCKET = 512                // bytes, serialised pair rumor
+DEFAULT_ROOM_BUCKET = 768           // bytes, room plaintext
+DEFAULT_TTL_SECONDS = undefined     // no expiration by default
+CREATED_AT_JITTER = 172800          // NIP-59 pushes created_at up to this far into the past
+ROOM_CASE_BYTE = 0x10
+class RumorTooLarge extends Error { length: number; bucket: number }
+```
+
+## Types
+
+```ts
+type EphemeralCase = 'none' | 'one' | 'both' | 'room'
+
+interface PairMaterial {
+  myPrivateKey: Uint8Array
+  peerPublicKey: string
+  myEphemeralPrivateKey?: Uint8Array
+  peerEphemeralPublicKey?: string
+}
+
+interface DropKey {
+  privateKey: Uint8Array   // opens the wrap layer, nothing inside it
+  publicKey: string        // the wrap's `p` tag
+  epochIndex: number
+  counter: number
+  case: EphemeralCase
+}
+
+interface DropOptions {
+  bucket?: number          // bytes the padded rumor (pair) or plaintext (room) is padded to
+  ttlSeconds?: number      // NIP-40 expiration counted from the jittered created_at; off by default
+  now?: () => number       // unix seconds; tests
+}
+
+interface Opened { rumor: UnsignedEvent & { id: string }; seal: NostrEvent }
+
+interface Peer {           // DropWatch.addPeer
+  peerPublicKey: string
+  myEphemeralPrivateKey?: Uint8Array
+  peerEphemeralPublicKey?: string
+  ref?: unknown
+}
+
+interface Match { peer: Peer; key: DropKey; alternate: boolean }
+
+interface DropWatchOptions {
+  epochSeconds?: number            // default 3600
+  lookbackEpochs?: number          // integer >= 1, default 48
+  rememberSeen?: number            // default 4096
+  counterRange?: [number, number]  // [lo, hi) inside [0, 64)
+}
+
+interface UsedCounters { epoch: number; counters: number[] }
+
+interface KeySource {      // KeyTable.set
+  ikm: Uint8Array
+  case: EphemeralCase
+  sender: string
+  max: number              // 1 to 65536
+  alternates?: { ikm: Uint8Array; case: EphemeralCase }[]
+}
+
+interface Hit<R = unknown> { ref: R; key: DropKey; alternate: boolean }
+
+interface CadenceOptions extends DropOptions {
+  intervalSeconds: number
+  slotOffset?: (slot: number) => number
+  onError?: (error: unknown) => void
+}
+
+interface Transport {
+  publish(event: NostrEvent): Promise<void>
+  subscribe(filters: Filter[], onEvent: (event: NostrEvent, via?: string) => void, onEose?: () => void): () => void
+  close(): void
+  describe?(): { url: string; read: boolean; write: boolean }[]
+}
+
+interface QuietOptions extends DropOptions {
+  roomKey: Uint8Array
+  member: string
+  members: string[]
+  kinds: number[]
+  intervalSeconds: number
+  epochSeconds?: number
+  lookbackSeconds?: number         // seconds, default 172800
+  pageSize?: number                // default 500
+  maxPages?: number                // default 1000
+  counterRange?: [number, number]  // inside [0, 16)
+  reservedCounters?: (epochIndex: number) => Iterable<number>
+  onError?: (error: unknown) => void
+  onPosted?: (posted: { slot: number; wrap: NostrEvent; inner?: NostrEvent }) => void
+  slotOffset?: (slot: number) => number
+  schedule?: (tick: () => void, everyMs: number) => () => void
+}
+```
+
+## DropWatch
+
+```ts
+class DropWatch {
+  constructor(myPrivateKey: Uint8Array, opts?: DropWatchOptions)
+  addPeer(peer: Peer): void
+  removePeer(peerPublicKey: string): void
+  sendKey(peerPublicKey: string, unixSeconds: number): DropKey   // throws Error('unknown peer') or EpochExhausted
+  match(event: NostrEvent, unixSeconds: number): Match | null    // remembers nothing
+  remember(rumorId: string, wrapId?: string): boolean            // false if already delivered
+  exportUsed(): Record<string, UsedCounters>                     // keyed by peer public key
+  importUsed(state: Record<string, UsedCounters>, unixSeconds: number): void
+  refresh(unixSeconds: number): void
+  tags(unixSeconds: number): string[]
+  readonly size: number
+}
+```
+
+## KeyTable
+
+```ts
+class KeyTable<R = unknown> {
+  constructor(epochSeconds = 3600, lookbackEpochs = 48)
+  set(id: string, source: KeySource, ref: R): void
+  has(id: string): boolean
+  remove(id: string): void
+  readonly size: number
+  refresh(unixSeconds: number): void
+  lookup(tag: string): Hit<R> | undefined
+  tags(): string[]
+  sendKey(id: string, ikm: Uint8Array, c: EphemeralCase, sender: string, max: number, unixSeconds: number, range: [number, number] = [0, max], reserved: Iterable<number> = []): DropKey
+  markUsed(id: string, ikm: Uint8Array, epochIndex: number, counter: number, unixSeconds: number): void
+  exportUsed(): Record<string, UsedCounters>
+  importUsed(state: Record<string, UsedCounters>, ikmOf: (id: string) => Uint8Array | undefined, unixSeconds: number): void
+}
+```
+
+Use `DropWatch` for pairs and `QuietTransport` for rooms; `KeyTable` is for
+callers building their own receiver.
+
+## Cadence
+
+```ts
+class Cadence {
+  static readonly MAX_PENDING = 256
+  constructor(opts: CadenceOptions)
+  enqueue(seal: NostrEvent, dropPublicKey: () => string): void
+  due(unixSeconds: number): NostrEvent | null
+  readonly pending: number
+  slotIndex(unixSeconds: number): number
+  nextSlotAt(unixSeconds: number): number
+}
+```
+
+## QuietTransport
+
+```ts
+class QuietTransport implements Transport {
+  static readonly MAX_PENDING = 256
+  constructor(inner: Transport, opts: QuietOptions)
+  publish(event: NostrEvent): Promise<void>   // quiet kinds queue; others pass through; throws if too big for the bucket or the queue is full
+  subscribe(filters: Filter[], onEvent: (event: NostrEvent, via?: string) => void, onEose?: () => void): () => void
+  close(): void
+  describe(): { url: string; read: boolean; write: boolean }[]
+  rekey(roomKey: Uint8Array): void
+  setMembers(members: string[]): void
+  drop(id: string): boolean                   // take a queued event back by id before its slot
+  sendKey(): DropKey
+  exportUsed(): Record<string, UsedCounters>  // keyed by member
+  importUsed(state: Record<string, UsedCounters>): void   // no clock argument
+  tick(): Promise<void>
+  readonly pending: number
+}
+```
+
+## Deriving the rendezvous key
+
+```ts
+import { fromNsec, derive } from 'nsec-tree/core' // npm install nsec-tree
+import { getPublicKey } from 'nostr-tools/pure'
+
+declare const identityNsec: string // or fromMnemonic from 'nsec-tree', for a mnemonic
+
+// Run this where the root lives (the signer); hand devices only the child.
+const root = fromNsec(identityNsec)
+const rendezvous = derive(root, 'rendezvous', 0) // bump the index to rotate
+root.destroy()
+
+const myPrivateKey: Uint8Array = rendezvous.privateKey // pass this to DropWatch
+const myRendezvousPub: string = getPublicKey(myPrivateKey) // hex, for your contact card
+```
