@@ -2,9 +2,15 @@
 
 Gift wraps nobody can trace, sent whether or not there is anything to say.
 It replaces the `p` tag on a NIP-59 gift wrap with a per-epoch rendezvous
-key derived from a shared secret, so a watcher cannot tell whether a
-message was sent, to whom, or when. Byte-for-byte NIP-59: no new kinds,
-no new tags a relay has to know about.
+key derived from a shared secret. Over an anonymous carrier (Tor, I2P or a
+relay your own circle runs), a watcher cannot tell whether a message was
+sent, to whom, or when; the library never sees a socket, so on a plain
+connection the address still gives you away. Byte-for-byte NIP-59: no new
+kinds, no new tags a relay has to know about.
+
+ESM only (no `require` condition) and Node 22 or later. Times are unix
+seconds, private keys are `Uint8Array`, public keys are lower-case 64-char
+x-only hex. Per-export signatures are in `llms-full.txt`.
 
 ## Build & Test
 

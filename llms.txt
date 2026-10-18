@@ -24,31 +24,95 @@ library does not cover.
 npm install nostr-deaddrop
 ```
 
+ESM only: there is no `require` condition, so `require('nostr-deaddrop')` fails
+with `ERR_PACKAGE_PATH_NOT_EXPORTED`; use `import` (or `await import()` from
+CommonJS). Node 22 or later. Every time is unix seconds, never milliseconds.
+Private keys are 32-byte `Uint8Array`; public keys are lower-case 64-char
+x-only hex (what `getPublicKey` from `nostr-tools/pure` returns).
+
 ```ts
 import { DropWatch, Cadence, createDropSeal, openDrop, stripPadding, broadcastFilter } from 'nostr-deaddrop'
+import type { NostrEvent } from 'nostr-tools/pure'
+import type { Filter } from 'nostr-tools/filter'
 
+// Supplied by your app and your carrier, declared here so the example is complete.
+declare const myPrivateKey: Uint8Array // your rendezvous private key
+declare const friendPub: string        // their rendezvous public key, hex
+declare let lastPull: number           // unix seconds when your last pull began; persist it
+declare function publish(event: NostrEvent): Promise<void> // post one event over your carrier
+declare function pull(filter: Filter): Promise<NostrEvent[]> // one REQ over your carrier, resolves at EOSE
+declare function show(rumor: { kind: number; content: string; tags: string[][] }, ref: unknown): void
+
+const now = () => Math.floor(Date.now() / 1000)
+
+// Both sides hold the other's public key from a contact card or a bond.
 const watch = new DropWatch(myPrivateKey)
 watch.addPeer({ peerPublicKey: friendPub, ref: 'friend' })
 
+// Send: seal to the friend now, queue it; the cadence wraps it at its slot to a key unused this hour.
 const seal = createDropSeal({ kind: 14, content: 'see you at eight', tags: [['p', friendPub]] }, myPrivateKey, friendPub)
 const cadence = new Cadence({ intervalSeconds: 3600 })
 cadence.enqueue(seal, () => watch.sendKey(friendPub, now()).publicKey)
-setInterval(() => { const w = cadence.due(now()); if (w) publish(w) }, 30_000)
+let outbox: NostrEvent | null = null
+setInterval(async () => {
+  outbox ??= cadence.due(now())
+  if (!outbox) return
+  try { await publish(outbox); outbox = null } catch { /* keep it: post the same wrap next tick */ }
+}, 30_000)
 
-for await (const ev of subscribe(broadcastFilter(lastPull))) {
+// Receive: every wrap since last time, from anyone, over your carrier. `broadcastFilter`
+// reaches two days further back than `since` for the created_at jitter. Relays serve a
+// page at a time, so walk `until` back to the oldest wrap seen and stop when a page adds
+// nothing new. `until` is inclusive: the boundary second comes back once more and `seen`
+// drops the repeats.
+async function pullAll(since: number): Promise<NostrEvent[]> {
+  const out: NostrEvent[] = []
+  const seen = new Set<string>()
+  let until = now()
+  for (let page = 0; page < 1000; page++) {
+    const events = await pull({ ...broadcastFilter(since, 500), until })
+    const fresh = events.filter((ev) => !seen.has(ev.id))
+    if (fresh.length === 0) break
+    for (const ev of fresh) { seen.add(ev.id); out.push(ev) }
+    until = Math.min(...fresh.map((ev) => ev.created_at))
+  }
+  return out
+}
+
+const pullStarted = now()
+for (const ev of await pullAll(lastPull)) {
   const m = watch.match(ev, now())
   if (!m) continue
   let opened
   try { opened = openDrop(ev, m.key.privateKey, myPrivateKey) } catch { continue }
-  if (!watch.remember(opened.rumor.id)) continue
+  if (!watch.remember(opened.rumor.id, ev.id)) continue // a replay, or an old seal re-wrapped
   show(stripPadding(opened.rumor), m.peer.ref)
 }
+lastPull = pullStarted
+```
+
+`myPrivateKey` is a rendezvous key, never the identity key. Derive it with
+[nsec-tree](https://github.com/forgesworn/nsec-tree), where the root lives:
+
+```ts
+import { fromNsec, derive } from 'nsec-tree/core' // npm install nsec-tree
+import { getPublicKey } from 'nostr-tools/pure'
+
+declare const identityNsec: string // or fromMnemonic from 'nsec-tree', for a mnemonic
+
+// Run this where the root lives (the signer); hand devices only the child.
+const root = fromNsec(identityNsec)
+const rendezvous = derive(root, 'rendezvous', 0) // bump the index to rotate
+root.destroy()
+
+const myPrivateKey: Uint8Array = rendezvous.privateKey // pass this to DropWatch
+const myRendezvousPub: string = getPublicKey(myPrivateKey) // hex, for your contact card
 ```
 
 ## Key Concepts
 
-- **Rendezvous key**: a child of your root key (nsec-tree purpose
-  `rendezvous`), not your identity key. Its public half goes on a contact
+- **Rendezvous key**: a child of your root key (`derive(root, 'rendezvous', index)`
+  from [nsec-tree](https://github.com/forgesworn/nsec-tree)), not your identity key. Its public half goes on a contact
   card; both devices holding the private half can derive the same drop keys.
 - **Epoch**: a one-hour window. Both sides derive up to 64 drop keys per
   pair (16 per room member) for the current epoch from a shared secret,
@@ -62,24 +126,70 @@ for await (const ev of subscribe(broadcastFilter(lastPull))) {
 
 ## API Surface
 
-- `DropWatch`, `KeyTable`, `EpochExhausted`, `broadcastFilter`,
-  `taggedFilter`, `taggedFilters` -- deriving and matching drop keys, and
-  building relay filters for broadcast or tagged pulls.
-- `Cadence`, `randomOffset` -- queuing seals and releasing one wrap per
-  interval at a jittered moment.
-- `createDropSeal`, `wrapSeal`, `createDrop`, `createFiller`, `openDrop`,
-  `looksLikeWrap`, `stripPadding`, `padToBucket` -- sealing, wrapping,
-  opening and padding individual drops.
-- `deriveDropKey`, `deriveDropKeyFromIkm`, `deriveDropEpoch`,
-  `deriveDropWindow`, `epochIndexAt`, `ecdhX`, `pairIkm`, `pairIkmCases`
-  -- the key derivation primitives behind `DropWatch` and `Cadence`.
-- `deriveRoomDropKey`, `deriveRoomDropWindow`, `createRoomDrop`,
-  `openRoomDrop`, `createRoomFiller`, `roomIkm` -- the room equivalents.
-- `QuietTransport`, `roomFiller` -- wraps an existing relay transport so
-  chosen event kinds ride on the cadence and come back by broadcast.
+Signatures below are exact; `NostrEvent`, `UnsignedEvent` are from `nostr-tools/pure`, `Filter` from `nostr-tools/filter`. Types and constants: `llms-full.txt`.
+
+```ts
+// Derivation (src/derive.ts, src/room.ts)
+epochIndexAt(unixSeconds: number, epochSeconds = 3600): number          // floor(unixSeconds / epochSeconds); throws on a bad clock
+ecdhX(privateKey: Uint8Array, peerPublicKeyXOnly: string): Uint8Array   // 32-byte x-coordinate of the ECDH point
+pairIkm(m: PairMaterial): { ikm: Uint8Array; case: EphemeralCase }      // 65-byte `case_byte || static_x || eph_x`, byte-identical to forgesworn-link's rendezvous ikm
+pairIkmCases(m: PairMaterial): { ikm: Uint8Array; case: EphemeralCase }[] // every ikm the pair could be on while cards change hands, deduplicated; [0] is the one this side sends on
+deriveDropKey(m: PairMaterial, epochIndex: number, sender: string, counter = 0): DropKey
+deriveDropKeyFromIkm(ikm: Uint8Array, c: EphemeralCase, epochIndex: number, sender: string, counter = 0): DropKey // ikm must be 65 bytes, counter 0..65535, sender x-only hex
+deriveDropEpoch(ikm: Uint8Array, c: EphemeralCase, epochIndex: number, sender: string, max: number): DropKey[]   // counters 0..max-1 for one epoch
+deriveDropWindow(m: PairMaterial, unixSeconds: number, sender: string, epochSeconds = 3600, max = 64): DropKey[] // previous, current and next epoch
+roomIkm(roomKey: Uint8Array): Uint8Array                                 // roomKey is 32 bytes; ikm is `0x10 || HKDF(roomKey) || 32 zero bytes`
+deriveRoomDropKey(roomKey: Uint8Array, epochIndex: number, member: string, counter = 0): DropKey
+deriveRoomDropWindow(roomKey: Uint8Array, unixSeconds: number, member: string, epochSeconds = 3600, max = 16): DropKey[]
+
+// Wrapping, opening, padding (src/wrap.ts, src/room.ts)
+padToBucket(event: Partial<UnsignedEvent>, bucket = 512): Partial<UnsignedEvent> // adds a `pad` tag so the rumor serialises to exactly `bucket` bytes; created_at required; throws RumorTooLarge
+createDropSeal(event: Partial<UnsignedEvent>, senderPrivateKey: Uint8Array, recipientPublicKey: string, opts?: DropOptions): NostrEvent // pads to the bucket, makes the rumor, returns the kind 13 seal; queue this on a Cadence
+wrapSeal(seal: NostrEvent, dropPublicKey: string, opts?: DropOptions): NostrEvent // the outer kind 1059 layer: throwaway signer, `p` tag = dropPublicKey, jittered created_at
+createDrop(event: Partial<UnsignedEvent>, senderPrivateKey: Uint8Array, recipientPublicKey: string, dropPublicKey: string, opts?: DropOptions): NostrEvent // createDropSeal then wrapSeal in one go, for use without a Cadence
+createFiller(opts?: DropOptions): NostrEvent                             // a drop to throwaway keys with empty content, same size as a real one; nobody can open it
+openDrop(wrap: NostrEvent, dropPrivateKey: Uint8Array, recipientPrivateKey: Uint8Array): Opened // { rumor, seal }; throws if not a wrap, bad seal, or the rumor id is not its hash
+looksLikeWrap(e: unknown): e is NostrEvent                               // type guard: kind 1059, string content, hex pubkey, string-array tags; relays send anything
+stripPadding<T extends { tags: string[][] }>(rumor: T): T                // remove the `pad` tag before showing a rumor
+createRoomDrop(inner: NostrEvent, dropPublicKey: string, opts?: DropOptions): NostrEvent // wrap an already-signed room event, no seal; bucket defaults to 768
+openRoomDrop(wrap: NostrEvent, dropPrivateKey: Uint8Array): NostrEvent   // the inner event, signature verified
+createRoomFiller(innerKind: number, opts?: DropOptions): NostrEvent      // a room-sized filler whose inner event has kind innerKind
+
+// Watching and filters (src/watch.ts)
+new DropWatch(myPrivateKey: Uint8Array, opts?: DropWatchOptions)         // pairs; methods and options: llms-full.txt
+broadcastFilter(since: number, limit?: number): Filter                   // { kinds: [1059], since: since - 2 days, limit? }
+taggedFilter(tags: string[], since: number): Filter                      // one filter asking for all `tags` at once ({ '#p': tags }); weaker, leaks the peer count to the relay
+taggedFilters(tags: string[], since: number): Filter[]                   // one filter per tag, for one request per tag over separate circuits; prefer this over taggedFilter
+class EpochExhausted extends Error { epochIndex: number; max: number }   // thrown by sendKey when every counter in range is used; wait for the next epoch
+new KeyTable<R>(epochSeconds = 3600, lookbackEpochs = 48)                // the lookup table inside DropWatch and QuietTransport: tag -> Hit<R>
+
+// Scheduling (src/cadence.ts)
+new Cadence(opts: CadenceOptions)                                        // opts: DropOptions plus intervalSeconds, slotOffset?, onError?
+cadence.enqueue(seal: NostrEvent, dropPublicKey: () => string): void     // the callback runs when the slot comes; throws when 256 are queued
+cadence.due(unixSeconds: number): NostrEvent | null                      // at most one wrap per slot, a filler if nothing is queued; post it, retry the same wrap on failure
+randomOffset(intervalSeconds: number): number                            // CSPRNG integer in [0, intervalSeconds): where inside a slot to post
+
+// Rooms over a relay transport (src/transport.ts)
+new QuietTransport(inner: Transport, opts: QuietOptions)                 // methods and options: llms-full.txt
+roomFiller(kind: number, opts?: DropOptions): NostrEvent                 // identical to createRoomFiller(kind, opts): a one-line alias exposed from the transport module
+```
+
+`roomFiller(kind, opts)` only calls `createRoomFiller(kind, opts)`: same
+parameters, same result, no behavioural difference. `createRoomFiller` lives in
+the room module; `roomFiller` is an alias exported from the transport module for
+tests and for callers that pace their own stream. Use either.
+
+`taggedFilter` and `taggedFilters` both build `kind 1059` filters with a `#p`
+list; the singular returns one filter for many tags, the plural one filter per
+tag. Both reach two days back before `since`, like `broadcastFilter`.
+
+`opts.bucket` (in `DropOptions`, so on every create function, `Cadence` and
+`QuietTransport`) is bytes: the UTF-8 length of the whole padded rumor JSON for
+a pair (512 by default), of the `{ e: inner, pad }` plaintext for a room (768).
 
 ## Optional
 
+- Every export, type, constant and option interface: llms-full.txt
 - Full walkthrough, security notes and layer-by-layer threat model: README.md
 - Known-answer vectors: vectors/deaddrop.json
 - Changelog: CHANGELOG.md

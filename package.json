@@ -1,7 +1,7 @@
 {
   "name": "nostr-deaddrop",
   "version": "0.3.0",
-  "description": "Dead drops on Nostr: gift wraps addressed to a per-epoch rendezvous key instead of the recipient, sent on a cadence, received by broadcast. A watcher cannot tell whether a message was sent, to whom, or when.",
+  "description": "Dead drops on Nostr: gift wraps addressed to a per-epoch rendezvous key instead of the recipient, sent on a cadence, received by broadcast. Over an anonymous carrier, a watcher cannot tell whether a message was sent, to whom, or when.",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -16,7 +16,9 @@
     "dist",
     "vectors/deaddrop.json",
     "LICENCE",
-    "llms.txt"
+    "llms.txt",
+    "llms-full.txt",
+    "CHANGELOG.md"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
