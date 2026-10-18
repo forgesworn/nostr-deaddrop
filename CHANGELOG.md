@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.1 (2026-10-18)
+
+### Bug Fixes
+
+- align docs with source, add signatures, carrier caveat and ESM and Node notes (#3) (docs)
+
+
+
 ## 0.3.0 (2026-09-12)
 
 ### Features
